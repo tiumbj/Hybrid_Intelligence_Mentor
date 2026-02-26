@@ -1,143 +1,97 @@
 {
-  "mode": "B",
+  "_meta": {
+    "config_version": "2.9.1",
+    "last_updated": "2026-02-26",
+    "changelog": [
+      "Activate CONTINUATION mode deterministically (no BOS required).",
+      "Add CONTINUATION profile for config_resolver merge stability.",
+      "Lock timeframes to H4/H1/M15 as decided."
+    ]
+  },
   "symbol": "GOLD",
-  "enable_execution": false,
-  "confidence_threshold": 65,
-  "min_score": 6.0,
-  "min_rr": 1.7,
-  "lot": 0.01,
-  "structure_sensitivity": {
-    "htf": 4,
-    "mtf": 3,
-    "ltf": 1
-  },
-  "supertrend": {
-    "period": 21,
-    "multiplier": 4.0
-  },
-  "risk": {
-    "atr_period": 14,
-    "atr_sl_mult": 1.8
-  },
+  "mode": "CONTINUATION",
   "timeframes": {
-    "htf": "H1",
-    "mtf": "M30",
-    "ltf": "M5"
+    "htf": "H4",
+    "mtf": "H1",
+    "ltf": "M15"
   },
-  "profiles": {
-    "A": {
-      "mode": "A",
-      "symbol": "GOLD",
-      "enable_execution": false,
-      "confidence_threshold": 85,
-      "min_score": 8.0,
-      "min_rr": 2.5,
-      "lot": 0.01,
-      "structure_sensitivity": {
-        "htf": 6,
-        "mtf": 5,
-        "ltf": 4
-      },
-      "supertrend": {
-        "period": 10,
-        "multiplier": 3.5
-      },
-      "risk": {
-        "atr_period": 14,
-        "atr_sl_mult": 2.0
-      },
-      "timeframes": {
-        "htf": "H4",
-        "mtf": "H1",
-        "ltf": "M15"
-      }
-    },
-    "B": {
-      "mode": "B",
-      "symbol": "GOLD",
-      "enable_execution": false,
-      "confidence_threshold": 75,
-      "min_score": 7.0,
-      "min_rr": 2.0,
-      "lot": 0.01,
-      "structure_sensitivity": {
-        "htf": 5,
-        "mtf": 4,
-        "ltf": 3
-      },
-      "supertrend": {
-        "period": 10,
-        "multiplier": 3.0
-      },
-      "risk": {
-        "atr_period": 14,
-        "atr_sl_mult": 1.8
-      },
-      "timeframes": {
-        "htf": "H4",
-        "mtf": "H1",
-        "ltf": "M15"
-      }
-    },
-    "C": {
-      "mode": "C",
-      "symbol": "GOLD",
-      "enable_execution": false,
-      "confidence_threshold": 65,
-      "min_score": 6.0,
-      "min_rr": 1.8,
-      "lot": 0.01,
-      "structure_sensitivity": {
-        "htf": 4,
-        "mtf": 3,
-        "ltf": 2
-      },
-      "supertrend": {
-        "period": 7,
-        "multiplier": 2.5
-      },
-      "risk": {
-        "atr_period": 14,
-        "atr_sl_mult": 1.6
-      },
-      "timeframes": {
-        "htf": "H4",
-        "mtf": "H1",
-        "ltf": "M15"
-      }
-    }
+  "structure_sensitivity": {
+    "htf": 5,
+    "mtf": 4,
+    "ltf": 3
   },
-  "breakout_proximity": {
-    "threshold": 5.0,
-    "min_score": 12,
-    "threshold_atr": 1.0
+  "atr": {
+    "period": 14,
+    "sl_mult": 1.8
   },
-  
+  "min_rr": 2.0,
+  "supertrend": {
+    "period": 10,
+    "mult": 3.0
+  },
   "breakout": {
-  "confirm_buffer_atr": 0.05,
-  "require_retest": true,
-  "retest_band_atr": 0.30,
-  "proximity_threshold_atr": 1.50,
-  "proximity_min_score": 10
-},
-  
+    "confirm_buffer_atr": 0.05,
+    "proximity_threshold_atr": 1.5,
+    "proximity_min_score": 10.0,
+    "retest_required": true,
+    "retest_band_atr": 0.3
+  },
+  "continuation": {
+    "enabled": true,
+    "require_mtf_ltf_align": true,
+    "require_htf_not_opposite": true,
+    "proximity_threshold_atr": 1.8,
+    "proximity_min_score": 20.0
+  },
+  "ai": {
+    "enabled": false,
+    "api_url": "",
+    "model": "",
+    "timeout_sec": 12,
+    "max_retries": 0
+  },
   "telegram": {
     "enabled": true,
     "token_env": "TELEGRAM_BOT_TOKEN",
-    "chat_id_env": "TELEGRAM_CHAT_ID",
-    "notify_on": [
-      "signal",
-      "trade",
-      "error"
-    ]
+    "chat_id_env": "TELEGRAM_CHAT_ID"
   },
-  "ai": {
-    "api_key_env": "DEEPSEEK_API_KEY",
-    "timeout_seconds": 10,
-    "retry_attempts": 3,
-    "fallback_to_technical": true,
-    "enabled": false,
-    "provider": "openai",
-    "model": ""
+  "profiles": {
+    "PRECISION": {
+      "mode": "PRECISION",
+      "breakout": {
+        "proximity_threshold_atr": 1.2,
+        "proximity_min_score": 12.0,
+        "retest_required": true,
+        "retest_band_atr": 0.3
+      }
+    },
+    "BALANCED": {
+      "mode": "BALANCED",
+      "breakout": {
+        "proximity_threshold_atr": 1.5,
+        "proximity_min_score": 10.0,
+        "retest_required": true,
+        "retest_band_atr": 0.3
+      }
+    },
+    "FREQUENT": {
+      "mode": "FREQUENT",
+      "breakout": {
+        "proximity_threshold_atr": 1.8,
+        "proximity_min_score": 8.0,
+        "retest_required": false,
+        "retest_band_atr": 0.25
+      }
+    },
+    "CONTINUATION": {
+      "mode": "CONTINUATION",
+      "continuation": {
+        "enabled": true,
+        "require_mtf_ltf_align": true,
+        "require_htf_not_opposite": true,
+        "proximity_threshold_atr": 1.8,
+        "proximity_min_score": 20.0
+      }
+    }
   }
 }
