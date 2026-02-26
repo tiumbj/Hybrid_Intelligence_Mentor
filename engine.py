@@ -1,19 +1,19 @@
 """
 Hybrid Intelligence Mentor (HIM) Trading Engine
-Version: 2.6.3
+Version: 2.7.0
 
 Changelog:
-- 2.6.3 (2026-02-26):
-  - Add explicit conflict blocking:
-      * if LTF breakout confirmed opposite to HTF bias direction -> blocked_by includes "counter_breakout"
-  - Add watch_state:
-      * WATCH_COUNTER_BREAKOUT when opposite breakout exists
-      * WATCH_PROXIMITY when within proximity threshold
-  - Keep: contract gating (blocked -> direction NONE and candidates None)
+- 2.7.0 (2026-02-26):
+  - Implement REAL SuperTrend (ATR-based) on LTF data
+  - Set supertrend_ok based on SuperTrend direction vs bias direction
+  - Add context fields: supertrend_period, supertrend_mult, supertrend_dir, supertrend_value
+  - Keep: contract gating (blocked -> direction NONE, candidates None)
+  - Keep: counter_breakout block + watch_state
   - Keep: proximity_score crash fix
 
-Notes:
-- This change improves audit clarity (why NONE), not signal frequency.
+SuperTrend (ศัพท์):
+- ATR (Average True Range) = ค่าแกว่งตัวเฉลี่ย
+- SuperTrend = เส้นตามเทรนด์ที่คำนวณจาก ATR และ multiplier เพื่อบอกแนวโน้ม bullish/bearish
 """
 
 from __future__ import annotations
@@ -124,6 +124,9 @@ class TradingEngine:
             raise RuntimeError(f"not_enough_bars: got={len(rates)} need>=200 symbol={symbol} tf={timeframe}")
         return rates
 
+    # -------------------------
+    # ATR (EMA-style)
+    # -------------------------
     def atr(self, high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
         period = max(1, int(period))
         prev_close = np.roll(close, 1)
@@ -136,6 +139,58 @@ class TradingEngine:
             out[i] = out[i - 1] * (1 - alpha) + tr[i] * alpha
         return out
 
+    # -------------------------
+    # SuperTrend
+    # -------------------------
+    def supertrend(self, high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int, mult: float):
+        """
+        Returns:
+        - st: SuperTrend line values
+        - dir_arr: +1 bullish, -1 bearish
+        """
+        n = len(close)
+        period = max(1, int(period))
+        mult = float(max(mult, 0.1))
+
+        atr = self.atr(high, low, close, period)
+        hl2 = (high + low) / 2.0
+
+        upper = hl2 + mult * atr
+        lower = hl2 - mult * atr
+
+        f_upper = np.copy(upper)
+        f_lower = np.copy(lower)
+
+        dir_arr = np.ones(n, dtype=int)  # start bullish
+        st = np.zeros(n, dtype=float)
+
+        for i in range(1, n):
+            # Final upper band
+            if upper[i] < f_upper[i - 1] or close[i - 1] > f_upper[i - 1]:
+                f_upper[i] = upper[i]
+            else:
+                f_upper[i] = f_upper[i - 1]
+
+            # Final lower band
+            if lower[i] > f_lower[i - 1] or close[i - 1] < f_lower[i - 1]:
+                f_lower[i] = lower[i]
+            else:
+                f_lower[i] = f_lower[i - 1]
+
+            # Trend direction switch logic
+            if dir_arr[i - 1] == 1:
+                dir_arr[i] = -1 if close[i] < f_lower[i] else 1
+            else:
+                dir_arr[i] = 1 if close[i] > f_upper[i] else -1
+
+            st[i] = f_lower[i] if dir_arr[i] == 1 else f_upper[i]
+
+        st[0] = hl2[0]
+        return st, dir_arr
+
+    # -------------------------
+    # STRUCTURE (pivots)
+    # -------------------------
     def structure(self, data, sens: int) -> Tuple[str, Optional[float], Optional[float]]:
         high = data["high"]
         low = data["low"]
@@ -161,6 +216,9 @@ class TradingEngine:
 
         return trend, last_hi, last_lo
 
+    # -------------------------
+    # Proximity
+    # -------------------------
     def proximity_score(self, dist_buy: Optional[float], dist_sell: Optional[float], threshold_points: float):
         thr = max(self.safe_float(threshold_points, 0.0), 1e-9)
         best: Optional[float] = None
@@ -191,6 +249,9 @@ class TradingEngine:
         score = 100.0 * max(0.0, min(1.0, (thr - best) / thr))
         return float(score), side, float(best)
 
+    # -------------------------
+    # Score + Confidence
+    # -------------------------
     def compute_score_0_10(
         self,
         direction: str,
@@ -242,6 +303,9 @@ class TradingEngine:
             bonus += 4.0
         return int(round(self.clamp(base + bonus, 0.0, 100.0)))
 
+    # -------------------------
+    # MAIN
+    # -------------------------
     def generate_signal_package(self) -> Dict[str, Any]:
         cfg = self.reload_config()
 
@@ -251,6 +315,7 @@ class TradingEngine:
         risk_cfg = cfg.get("risk", {}) or {}
         prox_cfg = cfg.get("breakout_proximity", {}) or {}
         entry_cfg = cfg.get("entry_model", {}) or {}
+        st_cfg = cfg.get("supertrend", {}) or {}
 
         retest_atr_mult = self.safe_float(entry_cfg.get("retest_atr_mult"), 0.35)
 
@@ -271,6 +336,10 @@ class TradingEngine:
         threshold_atr_raw = prox_cfg.get("threshold_atr", None)
         threshold_points_fallback = prox_cfg.get("threshold", None)
 
+        # SuperTrend params
+        st_period = self.safe_int(st_cfg.get("period"), 10)
+        st_mult = self.safe_float(st_cfg.get("mult"), 3.0)
+
         blocked_reasons = []
         watch_state = "NONE"
 
@@ -289,18 +358,15 @@ class TradingEngine:
                 "score": 0.0,
                 "confidence_py": 0,
                 "bos": False,
-                "supertrend_ok": True,
-                "context": {
-                    "blocked_by": "no_data",
-                    "error": str(e),
-                    "timeframes": {"htf": htf, "mtf": mtf, "ltf": ltf},
-                },
+                "supertrend_ok": False,
+                "context": {"blocked_by": "no_data", "error": str(e), "timeframes": {"htf": htf, "mtf": mtf, "ltf": ltf}},
             }
 
         htf_trend, _, _ = self.structure(htf_data, sens_htf)
         mtf_trend, _, _ = self.structure(mtf_data, sens_mtf)
         ltf_trend, bos_hi, bos_lo = self.structure(ltf_data, sens_ltf)
 
+        # Bias
         direction = "NONE"
         bias_source = "NO_CLEAR_BIAS"
         if htf_trend == "bullish":
@@ -325,6 +391,21 @@ class TradingEngine:
 
         atr_arr = self.atr(high, low, close, atr_period)
         atr_val = float(atr_arr[-1]) if len(atr_arr) else 0.0
+
+        # SuperTrend calc (REAL)
+        st_line, st_dir_arr = self.supertrend(high, low, close, st_period, st_mult)
+        st_dir = "bullish" if int(st_dir_arr[-1]) == 1 else "bearish"
+        st_value = float(st_line[-1])
+
+        supertrend_ok = False
+        if direction == "BUY" and st_dir == "bullish":
+            supertrend_ok = True
+        elif direction == "SELL" and st_dir == "bearish":
+            supertrend_ok = True
+
+        # If direction exists but supertrend conflicts => add explicit block (configurable later)
+        if direction in ("BUY", "SELL") and not supertrend_ok:
+            blocked_reasons.append("supertrend_conflict")
 
         thr_atr = self.safe_float(threshold_atr_raw, default=0.0)
         if thr_atr > 0 and atr_val > 0:
@@ -362,7 +443,6 @@ class TradingEngine:
 
         prox_score, prox_side, prox_best_dist = self.proximity_score(dist_buy, dist_sell, threshold_points)
 
-        # Watch proximity (even if not trade)
         if watch_state == "NONE" and prox_score >= prox_min_score and prox_side in ("BUY", "SELL"):
             watch_state = "WATCH_PROXIMITY"
 
@@ -406,9 +486,6 @@ class TradingEngine:
             blocked=blocked,
         )
         confidence_py = self.compute_confidence_0_100(score_0_10, bos=bos, retest_ok=retest_ok, align=align)
-
-        supertrend_ok = True
-        supertrend_label = "PLACEHOLDER"
 
         if blocked:
             direction_out = "NONE"
@@ -480,8 +557,10 @@ class TradingEngine:
                 "retest_band": retest_band,
                 "retest_ok": retest_ok,
 
-                "bos": bool(bos),
-                "supertrend": supertrend_label,
+                "supertrend_period": st_period,
+                "supertrend_mult": st_mult,
+                "supertrend_dir": st_dir,
+                "supertrend_value": st_value,
                 "supertrend_ok": bool(supertrend_ok),
 
                 "watch_state": watch_state,
