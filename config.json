@@ -112,6 +112,15 @@
     "min_score": 12,
     "threshold_atr": 1.0
   },
+  
+  "breakout": {
+  "confirm_buffer_atr": 0.10,
+  "require_retest": true,
+  "retest_band_atr": 0.25,
+  "proximity_threshold_atr": 1.30,
+  "proximity_min_score": 12
+},
+  
   "telegram": {
     "enabled": true,
     "token_env": "TELEGRAM_BOT_TOKEN",
