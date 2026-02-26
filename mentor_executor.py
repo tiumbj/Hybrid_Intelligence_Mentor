@@ -7,9 +7,10 @@ Changelog:
   - FIX: BOS source of truth MUST come from pkg["bos"] (never context["bos"])
   - FIX: supertrend_ok source of truth MUST come from pkg["supertrend_ok"] (never context["supertrend_ok"])
   - FIX: NONE_REASON["bos"] and NONE_REASON["supertrend_ok"] are always boolean (never None)
+  - ENFORCE: contract fields bos/supertrend_ok MUST exist and MUST NOT be None (fail-fast)
   - RESPECT: ai.enabled (if false -> Technical Gate only; if true -> AI confirm-only)
-  - SAFETY: keep production-safe guardrails (spread, stops/freeze check, dedupe, open position guard)
   - TELEGRAM: send ONLY after final approval (no reject/NONE spam)
+  - SAFETY: keep production-safe guardrails (spread, stops/freeze check, dedupe, open position guard)
 
 Locked Rules (Do not change):
 - BOS required: if bos=False -> must be blocked (no_bos)
@@ -39,6 +40,7 @@ from config_resolver import resolve_effective_config
 from engine import TradingEngine
 from telegram_notifier import TelegramNotifier
 from trade_logger import TradeLogger
+
 
 # -----------------------------
 # Logging
@@ -80,6 +82,21 @@ def _floor_to_step(x: float, step: float) -> float:
     if step <= 0:
         return float(x)
     return math.floor(x / step) * step
+
+
+def _require_bool_field(pkg: Dict[str, Any], key: str) -> bool:
+    """
+    Contract enforcement:
+    - key MUST exist
+    - value MUST NOT be None
+    - returns bool(value)
+    """
+    if key not in pkg:
+        raise RuntimeError(f"CONTRACT_VIOLATION: missing top-level field: {key}")
+    v = pkg.get(key)
+    if v is None:
+        raise RuntimeError(f"CONTRACT_VIOLATION: top-level field '{key}' is None")
+    return bool(v)
 
 
 class HotConfig:
@@ -228,7 +245,7 @@ class MentorExecutor:
         else:
             return False, "invalid_direction"
 
-        # Freeze-level: conservative check (skip if too close to current market)
+        # Freeze-level: conservative check
         if freeze_level_points > 0:
             tick = self._get_tick(symbol)
             freeze_dist = float(freeze_level_points) * point
@@ -274,6 +291,7 @@ class MentorExecutor:
             acct = mt5.account_info()
             if acct is None:
                 return float(fallback_lot), "account_info_none_fallback"
+
             equity = float(getattr(acct, "equity", 0.0) or 0.0)
             if equity <= 0:
                 return float(fallback_lot), "equity_invalid_fallback"
@@ -300,6 +318,7 @@ class MentorExecutor:
             raw_lot = risk_amount / risk_per_lot
             lot = _floor_to_step(raw_lot, vol_step)  # floor only (never exceed risk)
             lot = _clamp(lot, vol_min, vol_max)
+
             return float(lot), (
                 f"risk equity={equity:.2f} risk_pct={risk_pct:.4f} risk={risk_amount:.2f} "
                 f"risk_per_1lot={risk_per_lot:.2f}"
@@ -352,9 +371,9 @@ class MentorExecutor:
     def _trace_none_reason(pkg: Dict[str, Any]) -> Dict[str, Any]:
         ctx = pkg.get("context", {}) or {}
 
-        # IMPORTANT: BOS/supertrend_ok must come from TOP-LEVEL
-        bos = bool(pkg.get("bos", False))
-        st_ok = bool(pkg.get("supertrend_ok", False))
+        # IMPORTANT: MUST come from TOP-LEVEL (and enforced)
+        bos = _require_bool_field(pkg, "bos")
+        st_ok = _require_bool_field(pkg, "supertrend_ok")
 
         return {
             "blocked_by": ctx.get("blocked_by"),
@@ -395,9 +414,9 @@ class MentorExecutor:
         sl = _safe_float(pkg.get("stop_candidate"), 0.0)
         tp = _safe_float(pkg.get("tp_candidate"), 0.0)
 
-        # IMPORTANT: BOS/supertrend_ok must come from TOP-LEVEL
-        bos = bool(pkg.get("bos", False))
-        st_ok = bool(pkg.get("supertrend_ok", False))
+        # IMPORTANT: MUST come from TOP-LEVEL (and enforced)
+        bos = _require_bool_field(pkg, "bos")
+        st_ok = _require_bool_field(pkg, "supertrend_ok")
 
         min_score = _safe_float(cfg_eff.get("min_score", 7.0), 7.0)
         min_rr = _safe_float(cfg_eff.get("min_rr", 2.0), 2.0)
@@ -420,6 +439,7 @@ class MentorExecutor:
             f"Score={score:.1f} (min={min_score:.1f}), RR={rr:.2f} (min={min_rr:.2f})",
             f"confidence_py={conf_py} (th={conf_th})",
         ]
+
         warnings = []
         if direction not in ("BUY", "SELL"):
             warnings.append("Direction is NONE/invalid")
@@ -452,19 +472,23 @@ class MentorExecutor:
     def _ai_confirm_decision(self, pkg: Dict[str, Any], fallback_decision: Dict[str, Any], cfg_eff: Dict[str, Any]) -> Dict[str, Any]:
         """
         - ai.enabled=true => call AIMentor.approve_trade()
-        - AIMentor currently reads context["bos"]/context["supertrend_ok"] in repo.
-          To keep contract correct without rewriting ai_mentor.py, we NORMALIZE a copy:
-          inject TOP-LEVEL pkg["bos"]/pkg["supertrend_ok"] into context before sending to AI.
         - If AI response invalid and ai.fallback_to_technical=true => fallback_decision
+        - IMPORTANT: AI is confirm-only; contract fields remain top-level.
+          If AI module still reads context keys, we normalize a copy for AI only.
         """
         ai_cfg = (cfg_eff.get("ai") or {}) if isinstance(cfg_eff, dict) else {}
         fallback_to_technical = bool(ai_cfg.get("fallback_to_technical", True))
 
         try:
+            # enforce contract first
+            bos = _require_bool_field(pkg, "bos")
+            st_ok = _require_bool_field(pkg, "supertrend_ok")
+
             normalized = dict(pkg)
             ctx = dict((pkg.get("context", {}) or {}))
-            ctx["bos"] = bool(pkg.get("bos", False))
-            ctx["supertrend_ok"] = bool(pkg.get("supertrend_ok", False))
+            # normalize for AI compatibility (AI confirm-only)
+            ctx["bos"] = bos
+            ctx["supertrend_ok"] = st_ok
             normalized["context"] = ctx
 
             ai_resp = self.ai.approve_trade(normalized)
@@ -477,7 +501,7 @@ class MentorExecutor:
             logger.error(traceback.format_exc())
             if fallback_to_technical:
                 return fallback_decision
-            # Hard-fail => reject
+
             rej = dict(fallback_decision)
             rej["approved"] = False
             rej["warnings"] = (rej.get("warnings", "") + "\nAI confirm failed and fallback disabled").strip()
@@ -543,9 +567,8 @@ class MentorExecutor:
         score = _safe_float(pkg.get("score", 0.0), 0.0)
         rr = _safe_float(pkg.get("rr", 0.0), 0.0)
 
-        # IMPORTANT: BOS/supertrend_ok from TOP-LEVEL
-        bos = bool(pkg.get("bos", False))
-        st_ok = bool(pkg.get("supertrend_ok", False))
+        bos = _require_bool_field(pkg, "bos")
+        st_ok = _require_bool_field(pkg, "supertrend_ok")
 
         confidence = int(decision.get("confidence", 0))
         entry = _safe_float(decision.get("entry", 0.0), 0.0)
@@ -608,14 +631,19 @@ class MentorExecutor:
             )
             return
 
+        # Contract enforcement early (prevents bos=None in logs)
+        try:
+            bos = _require_bool_field(pkg, "bos")
+            st_ok = _require_bool_field(pkg, "supertrend_ok")
+        except Exception as e:
+            logger.error(str(e))
+            self.tlog.append({"type": "contract_violation", "symbol": symbol, "error": str(e), "package": pkg})
+            raise
+
         direction = str(pkg.get("direction", "NONE"))
         score = _safe_float(pkg.get("score", 0.0), 0.0)
         rr = _safe_float(pkg.get("rr", 0.0), 0.0)
         confidence_py = _safe_int(pkg.get("confidence_py", 0), 0)
-
-        # IMPORTANT: contract fields at TOP-LEVEL
-        bos = bool(pkg.get("bos", False))
-        st_ok = bool(pkg.get("supertrend_ok", False))
 
         logger.info(
             f"SIGNAL: {direction} score={score:.1f} rr={rr:.2f} confidence_py={confidence_py} bos={bos} supertrend_ok={st_ok}"
@@ -643,14 +671,13 @@ class MentorExecutor:
 
         approved = bool(decision.get("approved", False))
         logger.info(f"DECISION({decision_mode}): approved={approved} conf={decision.get('confidence')}")
-
         self.tlog.append({"type": "decision", "symbol": symbol, "mode": decision_mode, "decision": decision})
 
         if not approved:
             # Telegram: approved-only => do not send
             return
 
-        # 5) Execution safety hardening (still allow DRY-RUN telegram as "APPROVED (DRY-RUN)")
+        # 5) Execution safety hardening
         entry = _safe_float(decision.get("entry"), _safe_float(pkg.get("entry_candidate"), 0.0))
         sl = _safe_float(decision.get("sl"), _safe_float(pkg.get("stop_candidate"), 0.0))
         tp = _safe_float(decision.get("tp"), _safe_float(pkg.get("tp_candidate"), 0.0))
@@ -675,7 +702,7 @@ class MentorExecutor:
             self.tlog.append({"type": "blocked", "symbol": symbol, "reason": "levels", "detail": why_levels})
             return
 
-        # Lot sizing: currently supports dynamic (risk_pct) if configured, else fallback lot from cfg
+        # Lot sizing (dynamic if risk configured; fallback to cfg lot)
         fallback_lot = _safe_float(cfg_eff.get("lot", 0.01), 0.01)
         lot, lot_note = self._calc_lot(cfg_eff, symbol, direction, entry, sl, fallback_lot=fallback_lot)
         logger.info(f"LOT: {lot:.2f} ({lot_note})")
