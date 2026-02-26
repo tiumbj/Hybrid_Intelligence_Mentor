@@ -1,14 +1,16 @@
 """
 Mentor Executor - Execution Controller (FINAL SPEC + Telegram + Trade Logging)
-Version: 2.2.2
+Version: 2.3.0
 
 Changelog:
-- 2.2.0: Implement effective config resolver (root + profiles[mode]) and log config snapshot
-- 2.2.1: Fix mentor message formatting crash when ctx fields are None (safe formatting helpers)
-- 2.2.2: Add full traceback logging + isolate mentor message build/send to prevent loop crash
+- 2.3.0 (2026-02-26):
+  - Telegram alert: SEND ONLY when signal is APPROVED (no more reject spam)
+  - Add dedupe/cooldown to prevent repeated approved alerts every loop
+  - Keep: effective config resolver logging, strict AI response validation, stable loop (no silent freeze)
 
 Rules enforced:
-- Execute ONLY if: approved == true AND confidence >= threshold AND enable_execution == true
+- Telegram: only-on-approved (approved==true AND confidence>=threshold)
+- Execute ONLY if: approved==true AND confidence>=threshold AND enable_execution==true
 - AI response MUST be strictly validated before execution
 - No silent freeze: all critical failures logged (with traceback)
 """
@@ -20,7 +22,7 @@ import json
 import time
 import logging
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import MetaTrader5 as mt5
 
@@ -29,7 +31,6 @@ from ai_mentor import AIMentor
 from telegram_notifier import TelegramNotifier
 from trade_logger import TradeLogger
 from config_resolver import resolve_effective_config, summarize_effective_config
-
 
 # -----------------------------
 # Logging
@@ -55,11 +56,6 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
 
 
 def _fmt_float(v: Any, decimals: int = 2, na: str = "NA") -> str:
-    """
-    Safe numeric formatter:
-    - None / non-numeric => "NA"
-    - numeric => formatted string
-    """
     try:
         if v is None:
             return na
@@ -76,7 +72,7 @@ class HotConfig:
         self._mtime = 0.0
         self._cache: Dict[str, Any] = {}
 
-    def load(self) -> Dict[str, Any]:
+    def load_raw(self) -> Dict[str, Any]:
         try:
             if not os.path.exists(self.path):
                 return self._cache or {}
@@ -91,17 +87,29 @@ class HotConfig:
             logger.error(f"CRITICAL: config.json load failed: {e}")
             return self._cache or {}
 
+    def load_effective(self) -> Dict[str, Any]:
+        raw = self.load_raw()
+        try:
+            return resolve_effective_config(raw)
+        except Exception as e:
+            logger.error(f"CRITICAL: resolve_effective_config failed: {e}")
+            return raw or {}
+
 
 class MentorExecutor:
     def __init__(self):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_path = os.path.join(base_dir, "config.json")
-        self.hcfg = HotConfig(self.config_path)
 
+        self.hcfg = HotConfig(self.config_path)
         self.engine = TradingEngine(config_path=self.config_path)
         self.ai = AIMentor()
         self.tg = TelegramNotifier(config_path=self.config_path)
         self.tlog = TradeLogger(os.path.join(base_dir, "trade_history.json"))
+
+        # Dedupe / cooldown (default 15 minutes)
+        self._last_alert_sig: Optional[str] = None
+        self._last_alert_ts: float = 0.0
 
         self._ensure_mt5()
 
@@ -116,7 +124,7 @@ class MentorExecutor:
     def _get_tick(self, symbol: str):
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
-            raise RuntimeError(f"Cannot get tick for symbol: {symbol}")
+            raise RuntimeError(f"Cannot get tick for symbol: {symbol} last_error={mt5.last_error()}")
         return tick
 
     def _place_market_order(self, symbol: str, direction: str, lot: float, sl: float, tp: float) -> Dict[str, Any]:
@@ -142,7 +150,7 @@ class MentorExecutor:
             "tp": float(tp),
             "deviation": 30,
             "magic": 20260225,
-            "comment": "HIM v2.2.2",
+            "comment": "HIM v2.3.0",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_FOK,
         }
@@ -177,16 +185,17 @@ class MentorExecutor:
         return False
 
     @staticmethod
-    def _build_mentor_message(symbol: str, direction: str, pkg: Dict[str, Any], ai_resp: Dict[str, Any]) -> str:
+    def _build_mentor_message(symbol: str, direction: str, pkg: Dict[str, Any], ai_resp: Dict[str, Any], enable_execution: bool) -> str:
         """
         MUST NOT CRASH (even when fields missing/None)
+        Telegram message: only when APPROVED
         """
         ctx = pkg.get("context", {}) or {}
 
         score = _safe_float(pkg.get("score", 0.0), 0.0)
         rr = _safe_float(pkg.get("rr", 0.0), 0.0)
-
         confidence = int(ai_resp.get("confidence", 0))
+
         entry = _safe_float(ai_resp.get("entry", 0.0), 0.0)
         sl = _safe_float(ai_resp.get("sl", 0.0), 0.0)
         tp = _safe_float(ai_resp.get("tp", 0.0), 0.0)
@@ -194,8 +203,12 @@ class MentorExecutor:
         rsi_s = _fmt_float(ctx.get("rsi"), decimals=1, na="NA")
         vol_s = _fmt_float(ctx.get("vol_ratio"), decimals=2, na="NA")
 
+        status = "APPROVED"
+        if not enable_execution:
+            status += " (DRY-RUN: enable_execution=false)"
+
         msg = []
-        msg.append("HIM Signal")
+        msg.append(f"HIM Signal — {status}")
         msg.append(f"Symbol: {symbol}")
         msg.append(f"Direction: {direction}")
         msg.append(f"Confidence: {confidence}%")
@@ -205,19 +218,17 @@ class MentorExecutor:
         msg.append("")
         msg.append("Mentor Explanation")
         msg.append(f"1) HTF trend: {ctx.get('HTF_trend')} | MTF: {ctx.get('MTF_trend')} | LTF: {ctx.get('LTF_trend')}")
-        msg.append(f"2) CHoCH: {ctx.get('choch')} | BOS(required): {ctx.get('bos')}")
-        msg.append(f"3) Zone: {('มี' if ctx.get('zone') else 'ไม่มี')} | SuperTrend: {ctx.get('supertrend')} (ok={ctx.get('supertrend_ok')})")
+        msg.append(f"2) BOS(required): {ctx.get('bos')} | Retest: {ctx.get('retest_ok')}")
+        msg.append(f"3) SuperTrend: {ctx.get('supertrend')} (ok={ctx.get('supertrend_ok')})")
         msg.append(f"4) Momentum: RSI={rsi_s} | VolRatio={vol_s}")
         msg.append(f"5) Score={score:.1f}/10 | RR={rr:.2f}")
 
         ai_reason = (ai_resp.get("reasoning") or "").strip()
         ai_warn = (ai_resp.get("warnings") or "").strip()
-
         if ai_reason:
             msg.append("")
             msg.append("AI Reasoning")
             msg.append(ai_reason)
-
         if ai_warn:
             msg.append("")
             msg.append("Warnings")
@@ -225,54 +236,79 @@ class MentorExecutor:
 
         return "\n".join(msg)
 
-    def _safe_telegram(self, symbol: str, direction: str, pkg: Dict[str, Any], ai_resp: Dict[str, Any]) -> None:
+    def _should_send_approved_alert(self, cfg_eff: Dict[str, Any], symbol: str, direction: str, ai_resp: Dict[str, Any]) -> bool:
         """
-        Isolate mentor message + telegram send so loop cannot crash.
-        Logs full traceback if something fails.
+        Dedupe to prevent spam:
+        - default cooldown 900 sec
+        - signature uses symbol+direction+entry/sl/tp rounded
         """
-        try:
-            mentor_msg = self._build_mentor_message(symbol, direction, pkg, ai_resp)
-        except Exception as e:
-            logger.error(f"CRITICAL: build_mentor_message failed: {e}")
-            logger.error("TRACEBACK:\n" + traceback.format_exc())
-            self.tlog.append({"type": "mentor_message_error", "error": str(e), "package": pkg, "ai": ai_resp})
-            return
+        tg_cfg = (cfg_eff.get("telegram") or {}) if isinstance(cfg_eff, dict) else {}
+        cooldown_sec = int(tg_cfg.get("cooldown_sec", 900))
 
+        entry = _safe_float(ai_resp.get("entry"), 0.0)
+        sl = _safe_float(ai_resp.get("sl"), 0.0)
+        tp = _safe_float(ai_resp.get("tp"), 0.0)
+
+        sig = f"{symbol}|{direction}|{entry:.2f}|{sl:.2f}|{tp:.2f}"
+
+        now = time.time()
+        if self._last_alert_sig == sig and (now - self._last_alert_ts) < cooldown_sec:
+            return False
+
+        self._last_alert_sig = sig
+        self._last_alert_ts = now
+        return True
+
+    def _safe_send_telegram_approved(self, cfg_eff: Dict[str, Any], symbol: str, direction: str, pkg: Dict[str, Any], ai_resp: Dict[str, Any], enable_execution: bool) -> None:
+        """
+        Locked behavior: send only when APPROVED (approved==true AND confidence>=threshold)
+        """
         try:
-            tg_ok = self.tg.send_text(mentor_msg)
-            if not tg_ok:
-                logger.warning("Telegram send failed or disabled (check config telegram.enabled and env vars).")
+            if not self._should_send_approved_alert(cfg_eff, symbol, direction, ai_resp):
+                logger.info("Telegram: dedupe/cooldown suppress.")
+                return
+
+            msg = self._build_mentor_message(symbol, direction, pkg, ai_resp, enable_execution=enable_execution)
+
+            # event_type="trade" to allow notify_on control in config.json
+            ok = self.tg.send_text(msg, event_type="trade")
+            if not ok:
+                logger.warning("Telegram send failed or disabled (check telegram.enabled / notify_on / env vars).")
                 self.tlog.append({"type": "telegram_failed", "symbol": symbol, "direction": direction})
-        except Exception as e:
-            logger.error(f"CRITICAL: telegram send_text failed: {e}")
-            logger.error("TRACEBACK:\n" + traceback.format_exc())
-            self.tlog.append({"type": "telegram_send_error", "error": str(e), "symbol": symbol, "direction": direction})
+        except Exception:
+            logger.error("CRITICAL: telegram build/send failed (isolated).")
+            logger.error(traceback.format_exc())
+            self.tlog.append({"type": "telegram_exception", "symbol": symbol, "direction": direction, "traceback": traceback.format_exc()})
 
     def run_once(self) -> None:
-        raw_cfg = self.hcfg.load()
-        cfg = resolve_effective_config(raw_cfg)
-        snap = summarize_effective_config(cfg)
-        logger.info(f"CFG_EFFECTIVE: {snap}")
+        # 0) Load effective config
+        cfg_eff = self.hcfg.load_effective()
 
-        symbol = str(cfg.get("symbol", "GOLD"))
-        enable_execution = bool(cfg.get("enable_execution", False))
-        conf_th = int(cfg.get("confidence_threshold", 75))
-        lot = float(cfg.get("lot", 0.01))
+        symbol = str(cfg_eff.get("symbol", "GOLD"))
+        enable_execution = bool(cfg_eff.get("enable_execution", False))
+        conf_th = int(cfg_eff.get("confidence_threshold", 75))
+        lot = float(cfg_eff.get("lot", 0.01))
+
+        # Log effective snapshot (compact)
+        try:
+            logger.info(f"CFG_EFFECTIVE: {summarize_effective_config(cfg_eff)}")
+        except Exception:
+            logger.info(f"CFG_EFFECTIVE: {cfg_eff}")
 
         # 1) Engine signal package
         try:
             pkg = self.engine.generate_signal_package()
         except Exception as e:
             logger.error(f"CRITICAL: engine failed: {e}")
-            logger.error("TRACEBACK:\n" + traceback.format_exc())
-            self.tlog.append({"type": "engine_error", "symbol": symbol, "error": str(e)})
+            logger.error(traceback.format_exc())
+            self.tlog.append({"type": "engine_error", "symbol": symbol, "error": str(e), "traceback": traceback.format_exc()})
             return
 
         direction = str(pkg.get("direction", "NONE"))
         score = _safe_float(pkg.get("score", 0.0), 0.0)
         rr = _safe_float(pkg.get("rr", 0.0), 0.0)
-        logger.info(f"SIGNAL: {direction} score={score:.1f} rr={rr:.2f}")
 
+        logger.info(f"SIGNAL: {direction} score={score:.1f} rr={rr:.2f}")
         self.tlog.append({"type": "signal", "symbol": symbol, "package": pkg})
 
         if direction not in ("BUY", "SELL"):
@@ -288,22 +324,19 @@ class MentorExecutor:
 
         approved = bool(ai_resp["approved"])
         confidence = int(ai_resp["confidence"])
-        entry = _safe_float(ai_resp["entry"], 0.0)
-        sl = _safe_float(ai_resp["sl"], 0.0)
-        tp = _safe_float(ai_resp["tp"], 0.0)
+        entry = float(ai_resp["entry"])
+        sl = float(ai_resp["sl"])
+        tp = float(ai_resp["tp"])
 
         logger.info(f"AI: approved={approved} confidence={confidence}%")
-        if ai_resp["reasoning"]:
+        if ai_resp.get("reasoning"):
             logger.info("REASONING:\n" + ai_resp["reasoning"])
-        if ai_resp["warnings"]:
+        if ai_resp.get("warnings"):
             logger.info("WARNINGS:\n" + ai_resp["warnings"])
 
         self.tlog.append({"type": "ai_decision", "symbol": symbol, "direction": direction, "ai": ai_resp})
 
-        # 3) Mentor message + Telegram (safe; never crash loop)
-        self._safe_telegram(symbol, direction, pkg, ai_resp)
-
-        # 4) Final safety gate
+        # 3) Final gates (approve/conf/enable_execution/sanity)
         if not approved:
             logger.info("Gate: rejected by AI.")
             self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "ai_rejected", "ai": ai_resp})
@@ -314,17 +347,20 @@ class MentorExecutor:
             self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "confidence_below_threshold", "ai": ai_resp})
             return
 
-        if not enable_execution:
-            logger.info("Gate: enable_execution=false (dry-run).")
-            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "execution_disabled", "ai": ai_resp})
-            return
-
         if not self._sanity(direction, entry, sl, tp):
             logger.error("CRITICAL: price sanity check failed. Skip execution.")
             self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "sanity_failed", "ai": ai_resp})
             return
 
-        # 5) Execute
+        # 4) Telegram (LOCKED): send only after APPROVED+confidence gate
+        self._safe_send_telegram_approved(cfg_eff, symbol, direction, pkg, ai_resp, enable_execution=enable_execution)
+
+        # 5) Execute (only if enable_execution==true)
+        if not enable_execution:
+            logger.info("Gate: enable_execution=false (dry-run).")
+            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "execution_disabled", "ai": ai_resp})
+            return
+
         order_res = self._place_market_order(symbol=symbol, direction=direction, lot=lot, sl=sl, tp=tp)
         if order_res.get("ok"):
             logger.info(f"ORDER OK: ticket={order_res.get('order')} price={order_res.get('price')}")
@@ -338,7 +374,6 @@ class MentorExecutor:
                 "direction": direction,
                 "enable_execution": enable_execution,
                 "confidence_threshold": conf_th,
-                "effective_config": snap,
                 "ai": ai_resp,
                 "order_result": order_res,
             }
@@ -351,8 +386,8 @@ class MentorExecutor:
                 self.run_once()
             except Exception as e:
                 logger.error(f"CRITICAL LOOP ERROR: {e}")
-                logger.error("TRACEBACK:\n" + traceback.format_exc())
-                self.tlog.append({"type": "loop_error", "error": str(e)})
+                logger.error(traceback.format_exc())
+                self.tlog.append({"type": "loop_error", "error": str(e), "traceback": traceback.format_exc()})
             time.sleep(interval_sec)
 
 
