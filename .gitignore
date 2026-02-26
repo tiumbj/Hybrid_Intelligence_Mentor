@@ -1,0 +1,14 @@
+﻿.env
+__pycache__/
+*.pyc
+*.log
+*.backup
+*.backup_*
+*.broken_*
+*.zip
+ai_response_log.json
+trade_close_state.json
+trade_history.json
+performance_stats.json
+dashboard.log
+him_system.log

@@ -1,0 +1,464 @@
+<pre>คำสั่ง Run ต่อเนื่อง (Continuous Mode)วิธีที่ 1: Run แบบ Interactive (แนะนำสำหรับมือใหม่) Code # 1. เปิด Terminal/Command Prompt
+cd /path/to/your/him_system
+
+# 2. รันโปรแกรม
+python mentor_executor.py
+
+# 3. เลือกโหมด Continuous
+Select Mode:
+  1. Single Analysis (Run once)
+  2. Continuous Mode (Run every 15 minutes)  ← เลือกนี้
+  3. Custom Interval
+  4. Exit
+
+Enter choice (1-4): 2
+
+# 4. โปรแกรมจะทำงานต่อเนื่องทุก 15 นาที
+# กด Ctrl+C เพื่อหยุดวิธีที่ 2: Run แบบกำหนดเวลาเอง Code python mentor_executor.py
+
+# เลือก Custom Interval
+Enter choice (1-4): 3
+
+# กำหนดเวลาที่ต้องการ (นาที)
+Enter interval in minutes: 5  # วิเคราะห์ทุก 5 นาที
+# หรือ
+Enter interval in minutes: 30  # วิเคราะห์ทุก 30 นาที
+# หรือ
+Enter interval in minutes: 60  # วิเคราะห์ทุก 1 ชั่วโมงวิธีที่ 3: Run แบบ Background (Linux/Mac)ใช้ nohup (ทำงานต่อแม้ปิด Terminal) Code # 1. สร้างไฟล์ auto_run.sh
+nano auto_run.sh
+
+# 2. ใส่โค้ดนี้ในไฟล์
+#!/bin/bash
+echo "2" | python mentor_executor.py
+
+# 3. บันทึกและปิด (Ctrl+X, Y, Enter)
+
+# 4. ทำให้ไฟล์รันได้
+chmod +x auto_run.sh
+
+# 5. รันแบบ Background
+nohup ./auto_run.sh > him_output.log 2>&1 &
+
+# 6. ตรวจสอบว่าทำงานอยู่
+ps aux | grep mentor_executor
+
+# 7. ดู Log แบบ Real-time
+tail -f him_output.log
+
+# 8. หยุดโปรแกรม
+pkill -f mentor_executor.pyวิธีที่ 4: Run แบบ Background (Windows)ใช้ Task Scheduler Code # 1. สร้างไฟล์ run_him.bat
+notepad run_him.bat
+
+# 2. ใส่โค้ดนี้
+@echo off
+cd C:\path\to\your\him_system
+echo 2 | python mentor_executor.py
+pause
+
+# 3. บันทึกและปิด
+
+# 4. รัน .bat file
+run_him.batหรือใช้ PowerShell แบบ Background Code # 1. สร้างไฟล์ run_him.ps1
+notepad run_him.ps1
+
+# 2. ใส่โค้ดนี้
+Set-Location "C:\path\to\your\him_system"
+"2" | python mentor_executor.py
+
+# 3. รันแบบ Background
+Start-Process powershell -ArgumentList "-File run_him.ps1" -WindowStyle Hidden
+
+# 4. ตรวจสอบว่าทำงานอยู่
+Get-Process python
+
+# 5. หยุดโปรแกรม
+Stop-Process -Name pythonวิธีที่ 5: Run แบบ Direct Command (ไม่ต้องเลือกเมนู)สร้างไฟล์ run_continuous.py: Code """Run HIM System in Continuous Mode Directly"""
+import sys
+import os
+
+# เพิ่ม path ของโปรเจค
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from mentor_executor import IntelligentMentor
+
+def main():
+    """Run continuous mode directly"""
+    print("""
+    ╔══════════════════════════════════════════════════════════════╗
+    ║                                                              ║
+    ║        HIM SYSTEM - CONTINUOUS MODE                         ║
+    ║        ระบบเทรดอัตโนมัติแบบต่อเนื่อง                        ║
+    ║                                                              ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """)
+    
+    # สร้าง Mentor instance
+    mentor = IntelligentMentor()
+    
+    # Initialize
+    if not mentor.initialize():
+        print("❌ System initialization failed - exiting")
+        return
+    
+    # กำหนดเวลาวิเคราะห์ (นาที)
+    INTERVAL_MINUTES = 15  # ← เปลี่ยนตรงนี้ได้
+    
+    print(f"\n🚀 Starting continuous mode...")
+    print(f"⏱️  Analysis interval: {INTERVAL_MINUTES} minutes")
+    print(f"⌨️  Press Ctrl+C to stop\n")
+    
+    try:
+        # รันต่อเนื่อง
+        mentor.run_continuous(interval_minutes=INTERVAL_MINUTES)
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Stopped by user")
+        mentor.shutdown()
+    except Exception as e:
+        print(f"\n❌ Error: {str(e)}")
+        mentor.shutdown()
+
+if __name__ == "__main__":
+    main()รันด้วยคำสั่งเดียว: Code python run_continuous.pyวิธีที่ 6: Run แบบ systemd Service (Linux - แนะนำสำหรับ VPS)สร้าง Service File Code # 1. สร้างไฟล์ service
+sudo nano /etc/systemd/system/him-trading.service
+
+# 2. ใส่โค้ดนี้
+[Unit]
+Description=HIM Trading System
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/your/him_system
+ExecStart=/usr/bin/python3 /path/to/your/him_system/run_continuous.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
+# 3. บันทึกและปิด (Ctrl+X, Y, Enter)
+
+# 4. Reload systemd
+sudo systemctl daemon-reload
+
+# 5. Enable service (เริ่มอัตโนมัติตอน boot)
+sudo systemctl enable him-trading.service
+
+# 6. Start service
+sudo systemctl start him-trading.service
+
+# 7. ตรวจสอบสถานะ
+sudo systemctl status him-trading.service
+
+# 8. ดู Log
+sudo journalctl -u him-trading.service -f
+
+# 9. หยุด Service
+sudo systemctl stop him-trading.service
+
+# 10. รีสตาร์ท Service
+sudo systemctl restart him-trading.serviceวิธีที่ 7: Run แบบ Docker (Advanced)สร้าง Dockerfile Code # Dockerfile
+FROM python:3.9-slim
+
+# ติดตั้ง dependencies
+RUN apt-get update && apt-get install -y \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# ตั้งค่า working directory
+WORKDIR /app
+
+# คัดลอกไฟล์
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY config.py engine.py mentor_executor.py run_continuous.py ./
+
+# รันโปรแกรม
+CMD ["python", "run_continuous.py"]สร้าง requirements.txt Code MetaTrader5==5.0.45
+polars==0.19.0
+numpy==1.24.3
+requests==2.31.0
+pytz==2023.3Build และ Run Docker Code # 1. Build Docker image
+docker build -t him-trading .
+
+# 2. Run container
+docker run -d --name him-system him-trading
+
+# 3. ดู Logs
+docker logs -f him-system
+
+# 4. หยุด Container
+docker stop him-system
+
+# 5. ลบ Container
+docker rm him-system
+
+# 6. รีสตาร์ท Container
+docker restart him-systemวิธีที่ 8: Run บน VPS (แนะนำสำหรับการใช้งานจริง)ขั้นตอนติดตั้งบน Ubuntu VPS: Code # 1. เชื่อมต่อ VPS
+ssh user@your-vps-ip
+
+# 2. อัพเดทระบบ
+sudo apt update && sudo apt upgrade -y
+
+# 3. ติดตั้ง Python
+sudo apt install python3 python3-pip -y
+
+# 4. ติดตั้ง Wine (สำหรับรัน MT5 บน Linux)
+sudo dpkg --add-architecture i386
+wget -nc https://dl.winehq.org/wine-builds/winehq.key
+sudo apt-key add winehq.key
+sudo add-apt-repository 'deb https://dl.winehq.org/wine-builds/ubuntu/ focal main'
+sudo apt update
+sudo apt install --install-recommends winehq-stable -y
+
+# 5. ดาวน์โหลด MT5
+wget https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe
+
+# 6. ติดตั้ง MT5 ด้วย Wine
+wine mt5setup.exe
+
+# 7. Upload โค้ด HIM System
+# ใช้ scp หรือ git clone
+
+# 8. ติดตั้ง Python libraries
+pip3 install MetaTrader5 polars numpy requests pytz
+
+# 9. สร้าง systemd service (ตามวิธีที่ 6)
+
+# 10. เริ่มใช้งาน
+sudo systemctl start him-trading.serviceวิธีที่ 9: Run แบบ Auto-Restart (ถ้าโปรแกรมหยุดจะรันใหม่อัตโนมัติ)สร้างไฟล์ run_forever.py: Code """Run HIM System with Auto-Restart"""
+import subprocess
+import time
+import sys
+from datetime import datetime
+
+def run_with_restart():
+    """Run program with automatic restart on crash"""
+    restart_count = 0
+    max_restarts = 10  # จำนวนครั้งสูงสุดที่รีสตาร์ทต่อเนื่อง
+    restart_delay = 30  # รอ 30 วินาทีก่อนรีสตาร์ท
+    
+    print("🔄 Auto-Restart Mode Enabled")
+    print(f"   Max consecutive restarts: {max_restarts}")
+    print(f"   Restart delay: {restart_delay} seconds\n")
+    
+    while restart_count < max_restarts:
+        try:
+            print(f"{'='*60}")
+            print(f"🚀 Starting HIM System (Attempt {restart_count + 1})")
+            print(f"   Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*60}\n")
+            
+            # รันโปรแกรมหลัก
+            result = subprocess.run([sys.executable, 'run_continuous.py'])
+            
+            # ถ้าออกปกติ (exit code 0) = ผู้ใช้หยุดเอง
+            if result.returncode == 0:
+                print("\n✅ Program exited normally")
+                break
+            
+            # ถ้า crash
+            restart_count += 1
+            print(f"\n⚠️ Program crashed (Exit code: {result.returncode})")
+            print(f"   Restart count: {restart_count}/{max_restarts}")
+            
+            if restart_count < max_restarts:
+                print(f"   Restarting in {restart_delay} seconds...")
+                time.sleep(restart_delay)
+            else:
+                print(f"\n❌ Maximum restart limit reached ({max_restarts})")
+                print("   Please check logs for errors")
+                break
+                
+        except KeyboardInterrupt:
+            print("\n\n⚠️ Stopped by user (Ctrl+C)")
+            break
+        except Exception as e:
+            print(f"\n❌ Unexpected error: {str(e)}")
+            restart_count += 1
+            
+            if restart_count < max_restarts:
+                print(f"   Restarting in {restart_delay} seconds...")
+                time.sleep(restart_delay)
+            else:
+                break
+    
+    print("\n" + "="*60)
+    print("👋 Auto-Restart Mode Terminated")
+    print("="*60)
+
+if __name__ == "__main__":
+    run_with_restart()รัน: Code python run_forever.pyวิธีที่ 10: Run แบบ Scheduled (รันเฉพาะช่วงเวลาที่กำหนด)สร้างไฟล์ run_scheduled.py: Code """Run HIM System Only During Market Hours"""
+import time
+from datetime import datetime, time as dt_time
+import pytz
+from mentor_executor import IntelligentMentor
+
+# กำหนดเวลาเทรด (UTC)
+TRADING_START = dt_time(0, 0)   # 00:00 UTC
+TRADING_END = dt_time(23, 59)   # 23:59 UTC
+
+# หรือกำหนดตามเวลาไทย (ต้องแปลงเป็น UTC)
+# TRADING_START = dt_time(7, 0)   # 07:00 UTC = 14:00 Thailand
+# TRADING_END = dt_time(16, 0)    # 16:00 UTC = 23:00 Thailand
+
+def is_trading_hours():How do you like this response?ต่อ Code def is_trading_hours():
+    """Check if current time is within trading hours"""
+    now = datetime.now(pytz.UTC).time()
+    
+    # ถ้าเวลาเริ่มน้อยกว่าเวลาสิ้นสุด (ไม่ข้ามวัน)
+    if TRADING_START < TRADING_END:
+        return TRADING_START <= now <= TRADING_END
+    # ถ้าข้ามวัน (เช่น 22:00 - 02:00)
+    else:
+        return now >= TRADING_START or now <= TRADING_END
+
+def is_weekend():
+    """Check if today is weekend"""
+    now = datetime.now(pytz.UTC)
+    # 5 = Saturday, 6 = Sunday
+    return now.weekday() >= 5
+
+def main():
+    """Run system only during trading hours"""
+    print("""
+    ╔══════════════════════════════════════════════════════════════╗
+    ║                                                              ║
+    ║        HIM SYSTEM - SCHEDULED MODE                          ║
+    ║        ระบบเทรดตามเวลาที่กำหนด                              ║
+    ║                                                              ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """)
+    
+    print(f"⏰ Trading Hours: {TRADING_START.strftime('%H:%M')} - {TRADING_END.strftime('%H:%M')} UTC")
+    print(f"📅 Trading Days: Monday - Friday")
+    print(f"⌨️  Press Ctrl+C to stop\n")
+    
+    mentor = None
+    system_running = False
+    
+    try:
+        while True:
+            current_time = datetime.now(pytz.UTC)
+            
+            # ตรวจสอบว่าอยู่ในช่วงเวลาเทรดหรือไม่
+            if is_weekend():
+                if system_running:
+                    print(f"\n📅 Weekend - Shutting down system")
+                    mentor.shutdown()
+                    system_running = False
+                    mentor = None
+                
+                print(f"💤 Weekend - Sleeping... (Current: {current_time.strftime('%Y-%m-%d %H:%M:%S')})")
+                time.sleep(3600)  # รอ 1 ชั่วโมง
+                continue
+            
+            if not is_trading_hours():
+                if system_running:
+                    print(f"\n🌙 Outside trading hours - Shutting down system")
+                    mentor.shutdown()
+                    system_running = False
+                    mentor = None
+                
+                print(f"💤 Outside trading hours - Sleeping... (Current: {current_time.strftime('%H:%M:%S')})")
+                time.sleep(300)  # รอ 5 นาที
+                continue
+            
+            # เริ่มระบบถ้ายังไม่ทำงาน
+            if not system_running:
+                print(f"\n🌞 Trading hours started - Initializing system...")
+                mentor = IntelligentMentor()
+                
+                if mentor.initialize():
+                    system_running = True
+                    print(f"✅ System ready at {current_time.strftime('%H:%M:%S')}")
+                else:
+                    print(f"❌ Initialization failed - Will retry in 5 minutes")
+                    time.sleep(300)
+                    continue
+            
+            # วิเคราะห์ตลาด
+            print(f"\n📊 Analyzing market at {current_time.strftime('%H:%M:%S')}...")
+            mentor.analyze_and_trade()
+            
+            # รอ 15 นาที
+            print(f"⏳ Waiting 15 minutes until next analysis...")
+            time.sleep(900)  # 15 minutes
+            
+    except KeyboardInterrupt:
+        print("\n\n⚠️ Stopped by user")
+        if system_running and mentor:
+            mentor.shutdown()
+    except Exception as e:
+        print(f"\n❌ Error: {str(e)}")
+        if system_running and mentor:
+            mentor.shutdown()
+
+if __name__ == "__main__":
+    main()รัน: Code python run_scheduled.py📊 สรุปวิธีการ Run ต่อเนื่องวิธีความยากเหมาะสำหรับข้อดีข้อเสีย1. Interactive⭐ ง่ายมือใหม่ใช้งานง่ายต้องเปิด Terminal ไว้2. Custom Interval⭐ ง่ายมือใหม่กำหนดเวลาได้ต้องเปิด Terminal ไว้3. nohup (Linux/Mac)⭐⭐ ปานกลางผู้ใช้ทั่วไปทำงาน Backgroundต้องจัดการ Process เอง4. Task Scheduler (Windows)⭐⭐ ปานกลางWindows Userทำงานอัตโนมัติตั้งค่ายุ่งยาก5. Direct Command⭐ ง่ายทุกคนรันด้วยคำสั่งเดียวต้องเปิด Terminal ไว้6. systemd Service⭐⭐⭐ ยากVPS/Serverเริ่มอัตโนมัติ, มั่นคงต้องใช้ Linux7. Docker⭐⭐⭐⭐ ยากมากDeveloperแยก Environmentต้องเรียนรู้ Docker8. VPS⭐⭐⭐ ยากการใช้งานจริงทำงาน 24/7มีค่าใช้จ่าย9. Auto-Restart⭐⭐ ปานกลางทุกคนรีสตาร์ทอัตโนมัติต้องเปิด Terminal ไว้10. Scheduled⭐⭐ ปานกลางทุกคนประหยัดทรัพยากรซับซ้อนกว่า🎯 คำแนะนำการเลือกใช้สำหรับมือใหม่: Code # ใช้วิธีที่ 5 - Direct Command (ง่ายที่สุด)
+python run_continuous.pyสำหรับผู้ใช้ทั่วไป: Code # Linux/Mac: ใช้วิธีที่  3 - nohup
+nohup python run_continuous.py > output.log 2>&1 &
+
+# Windows: ใช้วิธีที่ 4 - Task Scheduler
+# หรือใช้วิธีที่ 9 - Auto-Restart
+python run_forever.pyสำหรับการใช้งานจริง (Production): Code # ใช้ VPS + systemd Service (วิธีที่ 6 + 8)
+# หรือใช้ Scheduled Mode (วิธีที่ 10)
+python run_scheduled.py🔧 การจัดการโปรแกรมที่รันอยู่ตรวจสอบว่าโปรแกรมกำลังรันอยู่หรือไม่:Linux/Mac: Code # ดู Process ทั้งหมด
+ps aux | grep mentor_executor
+
+# ดูเฉพาะ Python processes
+ps aux | grep python
+
+# ใช้ htop (ต้องติดตั้งก่อน)
+htopWindows: Code # ดู Process ทั้งหมด
+Get-Process python
+
+# หรือใช้ Task Manager
+tasklist | findstr pythonหยุดโปรแกรม:Linux/Mac: Code # หา Process ID (PID)
+ps aux | grep mentor_executor
+
+# หยุดด้วย PID
+kill 12345  # แทนที่ 12345 ด้วย PID จริง
+
+# หยุดแบบ Force
+kill -9 12345
+
+# หยุดทุก Process ที่เกี่ยวข้อง
+pkill -f mentor_executor.pyWindows: Code # หยุดด้วยชื่อ Process
+Stop-Process -Name python
+
+# หยุดด้วย PID
+Stop-Process -Id 12345
+
+# หรือใช้ Task Manager
+taskkill /F /IM python.exeรีสตาร์ทโปรแกรม:Linux/Mac (ถ้าใช้ systemd): Code sudo systemctl restart him-trading.serviceLinux/Mac (ถ้าใช้ nohup): Code # หยุดก่อน
+pkill -f mentor_executor.py
+
+# รันใหม่
+nohup python run_continuous.py > output.log 2>&1 &Windows: Code # หยุดก่อน
+Stop-Process -Name python
+
+# รันใหม่
+Start-Process python -ArgumentList "run_continuous.py"📝 ดู Log แบบ Real-timeLinux/Mac: Code # ดู Log file
+tail -f him_system.log
+
+# ดู Output file (ถ้าใช้ nohup)
+tail -f output.log
+
+# ดู systemd logs
+sudo journalctl -u him-trading.service -fWindows: Code # ดู Log file
+Get-Content him_system.log -Wait -Tail 50⚡ Quick Start Commands (คัดลอกไปใช้เลย)รันครั้งเดียว: Code python mentor_executor.py
+# กด 1รันต่อเนื่อง 15 นาที: Code python mentor_executor.py
+# กด 2รันต่อเนื่องแบบ Direct: Code python run_continuous.pyรันต่อเนื่อง + Auto-Restart: Code python run_forever.pyรันตามเวลาที่กำหนด: Code python run_scheduled.pyรัน Background (Linux/Mac): Code nohup python run_continuous.py > output.log 2>&1 &ดู Process ที่รันอยู่: Code # Linux/Mac
+ps aux | grep python
+
+# Windows
+Get-Process pythonหยุดโปรแกรม: Code # Linux/Mac
+pkill -f mentor_executor.py
+
+# Windows
+Stop-Process -Name python🚨 ข้อควรระวังต้องเปิด MT5 Terminal ไว้ตลอดเวลา - โปรแกรมต้องการเชื่อมต่อกับ MT5ต้องมีอินเทอร์เน็ตเสถียร - ขาดการเชื่อมต่อจะทำให้พลาดสัญญาณตรวจสอบ Log เป็นประจำ - เพื่อดูว่ามีข้อผิดพลาดหรือไม่ทดสอบบน Demo ก่อน - อย่ารีบใช้ Real Accountมีแผน Backup - กรณีโปรแกรมหยุดทำงาน
+
+</pre>

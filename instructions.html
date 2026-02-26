@@ -1,0 +1,1331 @@
+<pre> NSTALLATION & USAGE GUIDEPrerequisites Code # Install required packages
+pip install MetaTrader5 polars numpy requests pytzConfiguration StepsEdit config.py:
+# Update your MT5 credentials
+MT5_LOGIN = YOUR_LOGIN_NUMBER
+MT5_PASS = "YOUR_PASSWORD"
+MT5_SERVER = "YOUR_BROKER_SERVER"
+
+# Add your MarketAux API key
+NEWS_API_KEY = "your_marketaux_api_key"
+
+Get MarketAux API Key:
+
+Visit https://www.marketaux.com/
+Sign up for free account
+Get API key from dashboard
+Test endpoint: https://api.marketaux.com/v1/news/all?api_token=YOUR_KEY&symbols=XAU&filter_entities=true
+
+Verify Telegram Bot:
+
+Bot token and Chat ID are already configured
+Test by running the system
+
+Running the System Code # Single analysis
+python mentor_executor.py
+# Choose option 1
+
+# Continuous monitoring (15-minute intervals)
+python mentor_executor.py
+# Choose option 2
+
+# Custom interval
+python mentor_executor.py
+# Choose option 3 and enter desired intervalTesting Individual Components Code # Test trading engine
+python engine.py
+
+# This will:
+# - Fetch market data
+# - Calculate indicators
+# - Detect market structure
+# - Generate technical snapshots
+# - Calculate confluenceSYSTEM FEATURES IMPLEMENTED✅ 3-File Architectureconfig.py: Centralized configurationengine.py: High-performance data processing with Polarsmentor_executor.py: Connectivity, AI verification, execution✅ Technical Analysis (10+ Indicators)EMA 50/200 - Trend identificationMACD (12,26,9) - MomentumRSI 14 - Overbought/oversoldATR 14 - Volatility measurementParabolic SAR - Trend stopsSupport/Resistance Levels - Key price zonesOrder Blocks - Demand/Supply zonesFair Value Gaps (FVG) - Price imbalancesPin Bars - Reversal patternsLiquidity Sweeps - Stop huntsBOS - Break of StructureCHoCH - Change of Character✅ Multi-Timeframe AnalysisHTF (D1): Overall trendMTF (H1): Zone identificationLTF (M15): Entry timing✅ Market Structure (Dow Theory)Swing highs/lows detectionTrend determinationStructure breaks (BOS/CHoCH)✅ AI VerificationDeepSeek AI integrationConfidence scoringReasoning explanationTrade approval/rejection✅ News SentimentMarketAux API integrationGold-specific news filteringSentiment scoringHeadline analysis✅ Risk Management1% risk per tradeMinimum 2:1 R:R ratioPosition sizing calculationDaily trade limitsSpread checking✅ Resilience & MonitoringHeartbeat connection checks (60s)Auto-reconnect with exponential backoffError handling and loggingTelegram notifications✅ Mentorship SystemHuman-readable explanations"Why" behind every signalAI reasoning transparencyEducational feedbackCONFLUENCE SCORING SYSTEMThe system calculates a weighted confluence score:FactorWeightDescriptionTrend Alignment1.5HTF/MTF/LTF trends alignedEMA Cross1.0EMA 50/200 crossoverOrder Block1.5Price at demand/supply zoneCHoCH1.5Change of character detectedLiquidity Sweep1.5Stop hunt confirmationBOS1.0Break of structureFVG1.0Fair value gap presentPin Bar1.0Reversal patternSupport/Resistance1.0Price at key levelNews Sentiment1.0Sentiment alignmentMACD Signal0.5Momentum confirmationRSI Zone0.5Overbought/oversoldSAR Flip0.5Trend reversalMinimum Confluence Score: 3.0 (configurable)EXAMPLE OUTPUT Code 🎯 HIM TRADING SIGNAL
+========================================
+🕐 Time: 2024-02-24 14:30:00 UTC
+
+🟢 SIGNAL: BUY
+⚖️ Confluence Score: 4.5
+💰 Entry: 2045.50
+🛑 Stop Loss: 2038.20
+🎯 Take Profit: 2060.10
+📊 Risk:Reward: 1:2.0
+
+📚 MENTOR EXPLANATION:
+📊 Multi-Timeframe Trend:
+  • HTF (D1): BULLISH
+  • MTF (H1): BULLISH
+  • LTF (M15): BULLISH
+
+📈 Technical Indicators:
+  • EMA: Bullish Cross
+  • RSI: 32.45 (Oversold)
+  • MACD: Bullish
+  • SAR: Bullish
+
+🏗️ Market Structure:
+  • Break of Structure
+  • 2 Order Blocks
+  • 1 Fair Value Gaps
+
+🎯 Price Action Patterns:
+  • Bullish Pin Bar
+  • Liquidity Sweep Low (Bullish)
+
+📰 News Sentiment:
+  • Overall: BULLISH
+  • Score: 0.45
+  • Articles: 3
+
+⭐ Top Confluence Factors:
+  ✅ Trend Alignment: 1.50
+  ✅ Order Block: 1.50
+  ✅ Liquidity Sweep: 1.50
+  ✅ Pin Bar: 1.00
+  ✅ Ema Cross: 1.00
+
+🤖 AI VERIFICATION:
+✅ Status: APPROVED
+🎯 Confidence: 85.0%
+💭 AI Reasoning:
+Strong bullish setup with multi-timeframe alignment.
+Price at demand zone with liquidity sweep confirmation.
+News sentiment supports upside move.
+
+⚡ EXECUTION DETAILS:
+✅ Trade Executed Successfully
+🎫 Ticket: 123456789
+📦 Volume: 0.10 lots
+💵 Execution Price: 2045.52
+⏰ Time: 14:30:15
+
+========================================
+🤖 Hybrid Intelligence MentorSAFETY FEATURESPre-Trade Checks:
+
+Connection verification
+Daily trade limit
+Open position limit
+Spread validation
+Lot size validation
+
+AI Confidence Threshold:
+
+Minimum 80% AI confidence required
+Conservative rejection on errors
+
+Auto-Reconnect:
+
+5 reconnection attempts
+Exponential backoff (5s, 10s, 20s, 40s, 80s)
+
+Logging:
+
+File logging (him_system.log)
+Console output
+Error tracking
+
+CUSTOMIZATIONEdit config.py to adjust:Risk percentageConfluence thresholdAI confidence thresholdIndicator periodsTimeframesTrade limitsSystem Status: READY FOR DEPLOYMENT ✅All three files are complete with no placeholders. The system is production-ready with full error handling, resilience, and mentorship capabilities.How do you like this response?อธิบาย คำสัง run ถ้าจะแก้ไข telegram ข้อความให้เป็นภาษาไทย + อังกฤษ, วิธีใส่ AI API key and Market API,📚 คู่มือการใช้งาน HIM System ฉบับสมบูรณ์🚀 คำสั่ง RUN ระบบวิธีที่ 1: รันแบบ Single Analysis (วิเคราะห์ครั้งเดียว) Code # เปิด Terminal/Command Prompt ที่โฟลเดอร์โปรเจค
+cd /path/to/your/project
+
+# รันโปรแกรม
+python mentor_executor.py
+
+# เมื่อเห็นเมนู ให้กด 1 แล้ว Enter
+Select Mode:
+  1. Single Analysis (Run once)
+  2. Continuous Mode (Run every 15 minutes)
+  3. Custom Interval
+  4. Exit
+
+Enter choice (1-4): 1ผลลัพธ์:ระบบจะวิเคราะห์ตลาด 1 ครั้งส่งผลการวิเคราะห์ไปที่ Telegramปิดโปรแกรมอัตโนมัติวิธีที่ 2: รันแบบ Continuous (วิเคราะห์ทุก 15 นาที) Code python mentor_executor.py
+
+# กด 2 แล้ว Enter
+Enter choice (1-4): 2ผลลัพธ์:ระบบจะวิเคราะห์ตลาดทุก 15 นาทีทำงานต่อเนื่องจนกว่าจะกด Ctrl+Cเหมาะสำหรับเปิดทิ้งไว้ตลอดเวลาวิธีที่ 3: รันแบบ Custom Interval (กำหนดเวลาเอง) Code python mentor_executor.py
+
+# กด 3 แล้ว Enter
+Enter choice (1-4): 3
+
+# ใส่จำนวนนาทีที่ต้องการ (เช่น 5, 30, 60)
+Enter interval in minutes: 30ผลลัพธ์:ระบบจะวิเคราะห์ตลาดทุก 30 นาที (ตามที่กำหนด)วิธีหยุดโปรแกรม Code # กด Ctrl+C (Windows/Linux/Mac)
+# หรือปิด Terminal🌐 แก้ไข Telegram ให้เป็นภาษาไทย + อังกฤษขั้นตอนที่ 1: แก้ไขไฟล์ config.pyเพิ่มเทมเพลตภาษาไทยในส่วน TELEGRAM_TEMPLATES: Code # เดิม (บรรทัด 175-183 ใน config.py)
+TELEGRAM_TEMPLATES = {
+    "signal_header": "🎯 <b>HIM TRADING SIGNAL</b>\n{'='*40}\n",
+    "mentor_intro": "📚 <b>MENTOR EXPLANATION:</b>\n",
+    "ai_verdict": "🤖 <b>AI VERIFICATION:</b>\n",
+    "execution": "⚡ <b>EXECUTION DETAILS:</b>\n",
+    "error": "❌ <b>ERROR:</b>\n",
+    "heartbeat": "💓 System Heartbeat: All connections healthy\n"
+}
+
+# แก้เป็น (ภาษาไทย + อังกฤษ)
+TELEGRAM_TEMPLATES = {
+    "signal_header": "🎯 <b>สัญญาณเทรด HIM | HIM TRADING SIGNAL</b>\n{'='*40}\n",
+    "mentor_intro": "📚 <b>คำอธิบายจากที่ปรึกษา | MENTOR EXPLANATION:</b>\n",
+    "ai_verdict": "🤖 <b>การตรวจสอบจาก AI | AI VERIFICATION:</b>\n",
+    "execution": "⚡ <b>รายละเอียดการเทรด | EXECUTION DETAILS:</b>\n",
+    "error": "❌ <b>ข้อผิดพลาด | ERROR:</b>\n",
+    "heartbeat": "💓 ระบบทำงานปกติ | System Heartbeat: All connections healthy\n"
+}ขั้นตอนที่ 2: แก้ไขไฟล์ mentor_executor.pyแก้ฟังก์ชัน generate_mentor_message (บรรทัด 470-540): Code def generate_mentor_message(self, confluence: ConfluenceAnalysis,
+                            ai_verification: AIVerification,
+                            execution: Optional[TradeExecution] = None) -> str:
+    """Generate bilingual mentor message (Thai + English)"""
+    parts = []
+    
+    # Header
+    parts.append(TELEGRAM_TEMPLATES['signal_header'])
+    parts.append(f"🕐 <b>เวลา | Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
+    
+    # Signal Overview (Bilingual)
+    signal_emoji = "🟢" if confluence.signal_type == "BUY" else "🔴" if confluence.signal_type == "SELL" else "⚪"
+    signal_thai = "ซื้อ" if confluence.signal_type == "BUY" else "ขาย" if confluence.signal_type == "SELL" else "ไม่มี"
+    
+    parts.append(f"{signal_emoji} <b>สัญญาณ | SIGNAL:</b> {signal_thai} | {confluence.signal_type}")
+    parts.append(f"⚖️ <b>คะแนนความน่าเชื่อถือ | Confluence Score:</b> {confluence.total_score:.2f}")
+    parts.append(f"💰 <b>ราคาเข้า | Entry:</b> {confluence.entry_price:.2f}")
+    parts.append(f"🛑 <b>หยุดขาดทุน | Stop Loss:</b> {confluence.stop_loss:.2f}")
+    parts.append(f"🎯 <b>เป้าหมาย | Take Profit:</b> {confluence.take_profit:.2f}")
+    parts.append(f"📊 <b>อัตราผลตอบแทน | Risk:Reward:</b> 1:{confluence.risk_reward:.2f}\n")
+    
+    # Mentor Explanation (Bilingual)
+    parts.append(TELEGRAM_TEMPLATES['mentor_intro'])
+    
+    # Trend Analysis
+    trend_thai = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "ranging": "แกว่งตัว"}
+    parts.append(f"🔍 <b>แนวโน้มหลายไทม์เฟรม | Multi-Timeframe Trend:</b>")
+    parts.append(f"  • HTF (D1): {trend_thai.get(confluence.components.get('trend_alignment', 0) > 0 and 'bullish' or 'bearish', 'แกว่งตัว')} | {confluence.signal_type}")
+    
+    # Technical Indicators (Simplified Thai)
+    parts.append(f"\n📈 <b>ตัวชี้วัดทางเทคนิค | Technical Indicators:</b>")
+    parts.append(f"  • EMA: {'ครอสขาขึ้น' if 'bullish_cross' in str(confluence.components) else 'ครอสขาลง' if 'bearish_cross' in str(confluence.components) else 'เป็นกลาง'} | {confluence.signal_type} Trend")
+    parts.append(f"  • RSI: {'ขายมากเกินไป' if confluence.components.get('rsi_zone', 0) > 0 else 'ซื้อมากเกินไป' if confluence.components.get('rsi_zone', 0) < 0 else 'เป็นกลาง'} | Neutral")
+    
+    # Market Structure (Thai)
+    parts.append(f"\n🏗️ <b>โครงสร้างตลาด | Market Structure:</b>")
+    if confluence.components.get('bos', 0) != 0:
+        parts.append(f"  • ทะลุโครงสร้างราคา | Break of Structure")
+    if confluence.components.get('choch', 0) != 0:
+        parts.append(f"  • เปลี่ยนทิศทาง | Change of Character")
+    if confluence.components.get('order_block', 0) != 0:
+        parts.append(f"  • โซนออเดอร์บล็อก | Order Block Zone")
+    if confluence.components.get('fvg', 0) != 0:
+        parts.append(f"  • ช่องว่างราคา | Fair Value Gap")
+    
+    # Price Action (Thai)
+    parts.append(f"\n🎯 <b>รูปแบบราคา | Price Action Patterns:</b>")
+    if confluence.components.get('pinbar', 0) != 0:
+        parts.append(f"  • แท่งเทียนกลับตัว | Pin Bar Pattern")
+    if confluence.components.get('liquidity_sweep', 0) != 0:
+        parts.append(f"  • กวาดสต็อป | Liquidity Sweep")
+    
+    # AI Verification (Bilingual)
+    parts.append(f"\n{TELEGRAM_TEMPLATES['ai_verdict']}")
+    ai_emoji = "✅" if ai_verification.approved else "❌"
+    ai_status_thai = "อนุมัติ" if ai_verification.approved else "ไม่อนุมัติ"
+    
+    parts.append(f"{ai_emoji} <b>สถานะ | Status:</b> {ai_status_thai} | {'APPROVED' if ai_verification.approved else 'REJECTED'}")
+    parts.append(f"🎯 <b>ความมั่นใจ | Confidence:</b> {ai_verification.confidence:.1f}%")
+    parts.append(f"💭 <b>เหตุผล AI | AI Reasoning:</b>\n{ai_verification.reasoning}")
+    
+    # Execution Details (Bilingual)
+    if execution is not None:
+        parts.append(f"\n{TELEGRAM_TEMPLATES['execution']}")
+        if execution.success:
+            parts.append(f"✅ <b>เทรดสำเร็จ | Trade Executed Successfully</b>")
+            parts.append(f"🎫 <b>หมายเลข | Ticket:</b> {execution.ticket}")
+            parts.append(f"📦 <b>ขนาด | Volume:</b> {execution.volume:.2f} lots")
+            parts.append(f"💵 <b>ราคาเข้าจริง | Execution Price:</b> {execution.entry_price:.2f}")
+            parts.append(f"⏰ <b>เวลา | Time:</b> {execution.timestamp.strftime('%H:%M:%S')}")
+        else:
+            parts.append(f"❌ <b>เทรดล้มเหลว | Trade Execution Failed</b>")
+            parts.append(f"⚠️ <b>ข้อผิดพลาด | Error:</b> {execution.error_message}")
+    elif ai_verification.approved and ai_verification.confidence >= RISK.AI_CONFIDENCE_THRESHOLD:
+        parts.append(f"\n⏳ <b>รอดำเนินการ | Awaiting Execution...</b>")
+    else:
+        parts.append(f"\n🚫 <b>ไม่เทรด | Trade Not Executed</b>")
+        if not ai_verification.approved:
+            parts.append(f"   เหตุผล: AI ไม่อนุมัติ | Reason: AI verification rejected")
+        else:
+            parts.append(f"   เหตุผล: ความมั่นใจ AI ต่ำกว่าเกณฑ์ | Reason: AI confidence below threshold")
+    
+    parts.append(f"\n{'='*40}")
+    parts.append(f"🤖 <i>ระบบที่ปรึกษาเทรดอัจฉริยะ | Hybrid Intelligence Mentor</i>")
+    
+    return "\n".join(parts)🔑 วิธีใส่ API Keys1. AI API Key (DeepSeek)ขั้นตอนการขอ API Key: Code # 1. เข้าเว็บไซต์ DeepSeek
+https://platform.deepseek.com/
+
+# 2. สมัครสมาชิก (ฟรี)
+- คลิก "Sign Up"
+- ใส่อีเมล/รหัสผ่าน
+- ยืนยันอีเมล
+
+# 3. สร้าง API Key
+- เข้า Dashboard
+- คลิก "API Keys"
+- คลิก "Create New Key"
+- คัดลอก API Key (เช่น: sk-462b368e928148f08193668f48efe7eb)วิธีใส่ในโค้ด:แก้ไขไฟล์ config.py บรรทัดที่ 18: Code # เดิม
+AI_API_KEY = "sk-462b368e928148f08193668f48efe7eb"
+
+# แก้เป็น API Key ของคุณ
+AI_API_KEY = "sk-YOUR_ACTUAL_DEEPSEEK_API_KEY_HERE"ตัวอย่าง: Code AI_API_KEY = "sk-a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"2. MarketAux API Key (ข่าวสาร)ขั้นตอนการขอ API Key: Code # 1. เข้าเว็บไซต์ MarketAux
+https://www.marketaux.com/
+
+# 2. สมัครสมาชิก (How do you like this response?ต่อ Code # 2. สมัครสมาชิก (ฟรี)
+- คลิก "Get Started Free"
+- ใส่อีเมล/รหัสผ่าน
+- ยืนยันอีเมล
+
+# 3. รับ API Key
+- เข้า Dashboard
+- คลิก "API Keys" หรือ "Settings"
+- คัดลอก API Token (เช่น: abc123xyz789def456ghi)
+- แพลนฟรีได้ 100 requests/day
+
+# 4. ทดสอบ API Key
+https://api.marketaux.com/v1/news/all?api_token=YOUR_KEY&symbols=XAU&filter_entities=trueวิธีใส่ในโค้ด:แก้ไขไฟล์ config.py บรรทัดที่ 29: Code # เดิม
+NEWS_API_KEY = "your_marketaux_api_key_here"
+
+# แก้เป็น API Key ของคุณ
+NEWS_API_KEY = "abc123xyz789def456ghi"ตัวอย่าง: Code NEWS_API_KEY = "m4rk3t4ux_4p1_k3y_3x4mpl3_123456"3. ตรวจสอบว่าใส่ API Key ถูกต้องสร้างไฟล์ test_apis.py: Code """Test API Keys"""
+import requests
+from config import AI_API_KEY, NEWS_API_KEY, AI_API_URL
+
+def test_deepseek_api():
+    """Test DeepSeek AI API"""
+    print("🔍 Testing DeepSeek API...")
+    
+    headers = {
+        "Authorization": f"Bearer {AI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "user", "content": "Hello, are you working?"}
+        ],
+        "max_tokens": 50
+    }
+    
+    try:
+        response = requests.post(AI_API_URL, headers=headers, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            print("✅ DeepSeek API: SUCCESS")
+            print(f"   Response: {response.json()['choices'][0]['message']['content']}")
+            return True
+        else:
+            print(f"❌ DeepSeek API: FAILED (Status {response.status_code})")
+            print(f"   Error: {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ DeepSeek API: ERROR - {str(e)}")
+        return False
+
+
+def test_marketaux_api():
+    """Test MarketAux News API"""
+    print("\n🔍 Testing MarketAux API...")
+    
+    url = f"https://api.marketaux.com/v1/news/all"
+    params = {
+        'api_token': NEWS_API_KEY,
+        'symbols': 'XAU',
+        'filter_entities': 'true',
+        'limit': 3
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            print("✅ MarketAux API: SUCCESS")
+            print(f"   News found: {len(data.get('data', []))}")
+            if data.get('data'):
+                print(f"   Latest headline: {data['data'][0]['title'][:60]}...")
+            return True
+        else:
+            print(f"❌ MarketAux API: FAILED (Status {response.status_code})")
+            print(f"   Error: {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ MarketAux API: ERROR - {str(e)}")
+        return False
+
+
+if __name__ == "__main__":
+    print("="*60)
+    print("API KEY TESTING")
+    print("="*60)
+    
+    deepseek_ok = test_deepseek_api()
+    marketaux_ok = test_marketaux_api()
+    
+    print("\n" + "="*60)
+    print("SUMMARY")
+    print("="*60)
+    print(f"DeepSeek AI: {'✅ READY' if deepseek_ok else '❌ FAILED'}")
+    print(f"MarketAux News: {'✅ READY' if marketaux_ok else '❌ FAILED'}")
+    
+    if deepseek_ok and marketaux_ok:
+        print("\n🎉 All APIs are working! System is ready to run.")
+    else:
+        print("\n⚠️ Some APIs failed. Please check your API keys.")รันการทดสอบ: Code python test_apis.pyผลลัพธ์ที่ต้องการ: Code ============================================================
+API KEY TESTING
+============================================================
+🔍 Testing DeepSeek API...
+✅ DeepSeek API: SUCCESS
+   Response: Yes, I'm working! How can I assist you?
+
+🔍 Testing MarketAux API...
+✅ MarketAux API: SUCCESS
+   News found: 3
+   Latest headline: Gold prices surge amid inflation concerns...
+
+============================================================
+SUMMARY
+============================================================
+DeepSeek AI: ✅ READY
+MarketAux News: ✅ READY
+
+🎉 All APIs are working! System is ready to run.📝 สรุปขั้นตอนการติดตั้งทั้งหมดStep-by-Step Installation: Code # 1. ติดตั้ง Python Libraries
+pip install MetaTrader5 polars numpy requests pytz
+
+# 2. สร้างโฟลเดอร์โปรเจค
+mkdir him_trading_system
+cd him_trading_system
+
+# 3. สร้างไฟล์ทั้ง 3 ไฟล์
+# - config.py
+# - engine.py
+# - mentor_executor.py
+
+# 4. แก้ไข config.py
+# ใส่ข้อมูลทั้งหมด:
+# - MT5_LOGIN, MT5_PASS, MT5_SERVER
+# - AI_API_KEY (DeepSeek)
+# - NEWS_API_KEY (MarketAux)
+# - TELEGRAM_TOKEN, CHAT_ID (มีอยู่แล้ว)
+
+# 5. สร้างไฟล์ test_apis.py (ตามด้านบน)
+
+# 6. ทดสอบ API Keys
+python test_apis.py
+
+# 7. ทดสอบ Trading Engine
+python engine.py
+
+# 8. รันระบบ
+python mentor_executor.py🔧 แก้ปัญหาที่พบบ่อยปัญหา 1: DeepSeek API Error 401 Unauthorized Code # สาเหตุ: API Key ผิด
+# แก้ไข: ตรวจสอบ AI_API_KEY ใน config.py
+
+# ตรวจสอบว่า API Key ไม่มีเว้นวรรค
+AI_API_KEY = "sk-abc123"  # ✅ ถูกต้อง
+AI_API_KEY = " sk-abc123"  # ❌ ผิด (มีเว้นวรรคหน้า)
+AI_API_KEY = "sk-abc123 "  # ❌ ผิด (มีเว้นวรรคหลัง)ปัญหา 2: MarketAux API Error 429 Too Many Requests Code # สาเหตุ: เกินโควต้า (Free plan: 100 requests/day)
+# แก้ไข: ลด NEWS_LOOKBACK_HOURS ใน config.py
+
+# เดิม
+NEWS_LOOKBACK_HOURS = 24  # ดึงข่าว 24 ชั่วโมง
+
+# แก้เป็น
+NEWS_LOOKBACK_HOURS = 12  # ดึงข่าว 12 ชั่วโมง (ประหยัดโควต้า)ปัญหา 3: MT5 Connection Failed Code # สาเหตุ: ข้อมูล MT5 ผิด
+# แก้ไข: ตรวจสอบใน config.py
+
+# ตรวจสอบ Login (ต้องเป็นตัวเลข)
+MT5_LOGIN = 12345678  # ✅ ถูกต้อง
+MT5_LOGIN = "12345678"  # ❌ ผิด (ต้องไม่มี "")
+
+# ตรวจสอบ Password (ต้องมี "")
+MT5_PASS = "MyPassword123"  # ✅ ถูกต้อง
+MT5_PASS = MyPassword123  # ❌ ผิด (ต้องมี "")
+
+# ตรวจสอบ Server (ต้องมี "")
+MT5_SERVER = "ICMarkets-Demo"  # ✅ ถูกต้อง
+MT5_SERVER = ICMarkets-Demo  # ❌ ผิด (ต้องมี "")ปัญหา 4: Telegram ไม่ส่งข้อความ Code # สาเหตุ: Bot Token หรือ Chat ID ผิด
+# แก้ไข: ทดสอบด้วย Python
+
+import requests
+
+TELEGRAM_TOKEN = "7911598079:AAHcFaLeqFWpUKDy6xPcwYnNv-TGjMmQ1xU"
+CHAT_ID = "6607749155"
+
+url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+payload = {
+    "chat_id": CHAT_ID,
+    "text": "🧪 Test message from HIM System"
+}
+
+response = requests.post(url, json=payload)
+print(response.json())
+
+# ถ้าสำเร็จจะได้:
+# {'ok': True, 'result': {...}}
+
+# ถ้าผิดจะได้:
+# {'ok': False, 'error_code': 400, 'description': 'Bad Request: chat not found'}📊 ตัวอย่าง Output ภาษาไทย + อังกฤษ Code 🎯 สัญญาณเทรด HIM | HIM TRADING SIGNAL
+========================================
+🕐 เวลา | Time: 2024-02-24 15:30:00 UTC
+
+🟢 สัญญาณ | SIGNAL: ซื้อ | BUY
+⚖️ คะแนนความน่าเชื่อถือ | Confluence Score: 4.5
+💰 ราคาเข้า | Entry: 2045.50
+🛑 หยุดขาดทุน | Stop Loss: 2038.20
+🎯 เป้าหมาย | Take Profit: 2060.10
+📊 อัตราผลตอบแทน | Risk:Reward: 1:2.0
+
+📚 คำอธิบายจากที่ปรึกษา | MENTOR EXPLANATION:
+
+🔍 แนวโน้มหลายไทม์เฟรม | Multi-Timeframe Trend:
+  • HTF (D1): ขาขึ้น | BULLISH
+  • MTF (H1): ขาขึ้น | BULLISH
+  • LTF (M15): ขาขึ้น | BULLISH
+
+📈 ตัวชี้วัดทางเทคนิค | Technical Indicators:
+  • EMA: ครอสขาขึ้น | Bullish Cross
+  • RSI: ขายมากเกินไป | Oversold (32.45)
+  • MACD: ขาขึ้น | Bullish
+
+🏗️ โครงสร้างตลาด | Market Structure:
+  • ทะลุโครงสร้างราคา | Break of Structure
+  • โซนออเดอร์บล็อก | Order Block Zone
+  • ช่องว่างราคา | Fair Value Gap
+
+🎯 รูปแบบราคา | Price Action Patterns:
+  • แท่งเทียนกลับตัว | Pin Bar Pattern
+  • กวาดสต็อป | Liquidity Sweep
+
+🤖 การตรวจสอบจาก AI | AI VERIFICATION:
+✅ สถานะ | Status: อนุมัติ | APPROVED
+🎯 ความมั่นใจ | Confidence: 85.0%
+💭 เหตุผล AI | AI Reasoning:
+สัญญาณขาขึ้นที่แข็งแกร่ง มีการเรียงตัวของแนวโน้มหลายไทม์เฟรม
+ราคาอยู่ที่โซน Demand พร้อมยืนยันจากการกวาดสต็อป
+ข่าวสารสนับสนุนการขึ้น
+
+Strong bullish setup with multi-timeframe alignment.
+Price at demand zone with liquidity sweep confirmation.
+News sentiment supports upside move.
+
+⚡ รายละเอียดการเทรด | EXECUTION DETAILS:
+✅ เทรดสำเร็จ | Trade Executed Successfully
+🎫 หมายเลข | Ticket: 123456789
+📦 ขนาด | Volume: 0.10 lots
+💵 ราคาเข้าจริง | Execution Price: 2045.52
+⏰ เวลา | Time: 15:30:15
+
+========================================
+🤖 ระบบที่ปรึกษาเทรดอัจฉริยะ | Hybrid Intelligence Mentor🎯 เช็คลิสต์ก่อนรัน Code ✅ ติดตั้ง Python 3.8+ แล้ว
+✅ ติดตั้ง Libraries ครบแล้ว (pip install ...)
+✅ มี MT5 Terminal เปิดอยู่
+✅ ใส่ MT5_LOGIN, MT5_PASS, MT5_SERVER แล้ว
+✅ ใส่How do you like this response?ต่อ Code ✅ ใส่ AI_API_KEY (DeepSeek) แล้ว
+✅ ใส่ NEWS_API_KEY (MarketAux) แล้ว
+✅ ทดสอบ API Keys แล้ว (python test_apis.py)
+✅ ทดสอบ Engine แล้ว (python engine.py)
+✅ Telegram Bot พร้อมใช้งาน
+✅ มีอินเทอร์เน็ตเชื่อมต่อ
+✅ บัญชี MT5 มียอดเงินเพียงพอ🚨 คำเตือนสำคัญ1. ทดสอบบน Demo Account ก่อน Code # ใน config.py ให้ใช้ Demo Account ก่อน
+MT5_LOGIN = 12345678  # Demo Account
+MT5_SERVER = "ICMarkets-Demo"  # Demo Server
+
+# ⚠️ อย่ารีบใช้ Real Account จนกว่าจะทดสอบครบ2. ตั้งค่า Risk อย่างระมัดระวัง Code # ใน config.py - Risk Management
+RISK_PERCENT = 1.0  # ✅ เริ่มต้นที่ 1% ต่อเทรด
+
+# ⚠️ อย่าตั้งสูงกว่า 2% ในช่วงแรก
+RISK_PERCENT = 5.0  # ❌ อันตราย! เสี่ยงสูงเกินไป3. ตรวจสอบการเชื่อมต่อ Code # ระบบมี Heartbeat ตรวจสอบทุก 60 วินาที
+# ถ้าขาดการเชื่อมต่อจะ Auto-Reconnect
+
+# ใน config.py สามารถปรับได้:
+HEARTBEAT_INTERVAL = 60  # วินาที (ค่าเริ่มต้น)
+RECONNECT_ATTEMPTS = 5    # จำนวนครั้งที่พยายามเชื่อมต่อใหม่📱 วิธีดู Log การทำงาน1. ดู Log แบบ Real-time Code # เปิด Terminal อีกหน้าต่างหนึ่ง
+tail -f him_system.log
+
+# หรือบน Windows
+powershell Get-Content him_system.log -Wait2. ค้นหา Error ใน Log Code # Linux/Mac
+grep "ERROR" him_system.log
+
+# Windows PowerShell
+Select-String -Path him_system.log -Pattern "ERROR"3. ดูเฉพาะการเทรด Code # Linux/Mac
+grep "Trade Executed" him_system.log
+
+# Windows PowerShell
+Select-String -Path him_system.log -Pattern "Trade Executed"🔄 วิธีอัพเดทระบบ1. อัพเดท API Keys Code # แก้ไข config.py แล้วรีสตาร์ทโปรแกรม
+# ไม่ต้องแก้ไข engine.py หรือ mentor_executor.py2. อัพเดทพารามิเตอร์เทรด Code # ใน config.py
+
+# เปลี่ยน Timeframes
+TIMEFRAMES = {
+    'HTF': mt5.TIMEFRAME_D1,   # เดิม: D1
+    'MTF': mt5.TIMEFRAME_H4,   # เปลี่ยนเป็น: H4 (เดิม H1)
+    'LTF': mt5.TIMEFRAME_M15   # เดิม: M15
+}
+
+# เปลี่ยน Confluence Threshold
+CONFLUENCE_THRESHOLD = 3.5  # เดิม: 3.0 (เข้มงวดขึ้น)
+
+# เปลี่ยน AI Confidence
+AI_CONFIDENCE_THRESHOLD = 85.0  # เดิม: 80.0 (เข้มงวดขึ้น)3. อัพเดทข้อความ Telegram Code # แก้ไข mentor_executor.py
+# ฟังก์ชัน generate_mentor_message (บรรทัด 470-540)
+
+# เพิ่ม Emoji หรือข้อความใหม่ได้ตามต้องการ📊 Dashboard Monitoring (เสริม)สร้างไฟล์ dashboard.py เพื่อดูสถานะระบบ: Code """HIM System Dashboard"""
+import MetaTrader5 as mt5
+from datetime import datetime, timedelta
+import os
+
+def show_dashboard():
+    """Display system status dashboard"""
+    
+    # Clear screen
+    os.system('cls' if os.name == 'nt' else 'clear')
+    
+    print("╔══════════════════════════════════════════════════════════════╗")
+    print("║          HIM SYSTEM DASHBOARD - สถานะระบบ                  ║")
+    print("╚══════════════════════════════════════════════════════════════╝\n")
+    
+    # MT5 Connection
+    if mt5.initialize():
+        print("✅ MT5 Connection: CONNECTED")
+        
+        account_info = mt5.account_info()
+        if account_info:
+            print(f"   Account: {account_info.login}")
+            print(f"   Balance: ${account_info.balance:,.2f}")
+            print(f"   Equity: ${account_info.equity:,.2f}")
+            print(f"   Margin: ${account_info.margin:,.2f}")
+            print(f"   Free Margin: ${account_info.margin_free:,.2f}")
+            
+            # Profit/Loss
+            profit = account_info.profit
+            profit_emoji = "📈" if profit >= 0 else "📉"
+            print(f"   {profit_emoji} P/L: ${profit:,.2f}")
+        
+        # Open Positions
+        positions = mt5.positions_get()
+        print(f"\n📊 Open Positions: {len(positions) if positions else 0}")
+        
+        if positions:
+            for pos in positions:
+                pos_type = "🟢 BUY" if pos.type == mt5.ORDER_TYPE_BUY else "🔴 SELL"
+                pos_profit = pos.profit
+                profit_emoji = "💰" if pos_profit >= 0 else "💸"
+                
+                print(f"\n   Ticket: #{pos.ticket}")
+                print(f"   Type: {pos_type}")
+                print(f"   Symbol: {pos.symbol}")
+                print(f"   Volume: {pos.volume} lots")
+                print(f"   Entry: {pos.price_open:.2f}")
+                print(f"   Current: {pos.price_current:.2f}")
+                print(f"   SL: {pos.sl:.2f}")
+                print(f"   TP: {pos.tp:.2f}")
+                print(f"   {profit_emoji} Profit: ${pos_profit:.2f}")
+        
+        # Today's Orders
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        deals = mt5.history_deals_get(today, datetime.now())
+        
+        if deals:
+            print(f"\n📈 Today's Trades: {len(deals)}")
+            
+            total_profit = sum(deal.profit for deal in deals)
+            profit_emoji = "💰" if total_profit >= 0 else "💸"
+            print(f"   {profit_emoji} Total P/L: ${total_profit:.2f}")
+        
+        mt5.shutdown()
+    else:
+        print("❌ MT5 Connection: DISCONNECTED")
+    
+    # Log File Status
+    print("\n📝 Log File:")
+    if os.path.exists('him_system.log'):
+        log_size = os.path.getsize('him_system.log') / 1024  # KB
+        print(f"   Size: {log_size:.2f} KB")
+        
+        # Last 5 lines
+        with open('him_system.log', 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            print("\n   Last 5 Events:")
+            for line in lines[-5:]:
+                print(f"   {line.strip()}")
+    else:
+        print("   ⚠️ Log file not found")
+    
+    print("\n" + "="*60)
+    print(f"🕐 Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    import time
+    
+    try:
+        while True:
+            show_dashboard()
+            print("\n⏳ Refreshing in 30 seconds... (Ctrl+C to exit)")
+            time.sleep(30)
+    except KeyboardInterrupt:
+        print("\n👋 Dashboard closed")รัน Dashboard: Code python dashboard.py🎓 คำแนะนำการใช้งานจริงสัปดาห์ที่ 1: ทดสอบบน Demo Code # วันที่ 1-2: ทดสอบ Single Analysis
+python mentor_executor.py
+# เลือก 1 (Single Analysis)
+# รันทุกวัน 2-3 ครั้ง เพื่อดูว่าระบบทำงานถูกต้อง
+
+# วันที่ 3-5: ทดสอบ Continuous Mode
+python mentor_executor.py
+# เลือก 2 (Continuous Mode)
+# ปล่อยทิ้งไว้ 2-3 วัน ดูว่ามีปัญหาหรือไม่
+
+# วันที่ 6-7: วิเคราะห์ผลลัพธ์
+# - ดูจำนวนสัญญาณที่เกิดขึ้น
+# - ดู Win Rate
+# - ดู Risk:Reward เฉลี่ยสัปดาห์ที่ 2: ปรับแต่งพารามิเตอร์ Code # ถ้า Win Rate ต่ำกว่า 50%:
+# 1. เพิ่ม CONFLUENCE_THRESHOLD (3.0 → 3.5)
+# 2. เพิ่ม AI_CONFIDENCE_THRESHOLD (80 → 85)
+
+# ถ้าสัญญาณน้อยเกินไป:
+# 1. ลด CONFLUENCE_THRESHOLD (3.0 → 2.5)
+# 2. ลด AI_CONFIDENCE_THRESHOLD (80 → 75)
+
+# ถ้า R:R ไม่ดี:
+# 1. เพิ่ม MIN_RR_RATIO (2.0 → 2.5)สัปดาห์ที่ 3-4: เตรียมใช้งานจริง Code # 1. สรุปผล Demo 2 สัปดาห์
+# 2. ตรวจสอบ Drawdown สูงสุด
+# 3. ตรวจสอบ Max Consecutive Losses
+# 4. ถ้าผ่านเกณฑ์ → เตรียมใช้ Real Account
+
+# เกณฑ์ที่แนะนำ:
+# - Win Rate > 55%
+# - Average R:R > 2:1
+# - Max Drawdown < 10%
+# - Max Consecutive Losses < 3💡 Tips & Tricks1. ประหยัด API Quota Code # ใน config.py
+
+# ลดความถี่การดึงข่าว
+NEWS_LOOKBACK_HOURS = 12  # แทนที่จะเป็น 24
+
+# หรือปิดข่าวในช่วงทดสอบ
+# แก้ใน engine.py ฟังก์ชัน get_news_sentiment():
+def get_news_sentiment(self) -> Dict[str, Any]:
+    """Get news sentiment (disabled for testing)"""
+    return {
+        'sentiment': 'neutral',
+        'score': 0.0,
+        'news_count': 0,
+        'headlines': []
+    }2. เพิ่มความเร็ว Code # ใน config.py - ลดจำนวน Bars
+
+# เดิม
+BARS = 500
+
+# แก้เป็น
+BARS = 200  # เร็วขึ้น แต่ข้อมูลน้อยลง3. Backup Log Files Code # สร้างโฟลเดอร์ Backup
+mkdir logs_backup
+
+# Backup ทุกวัน
+# Linux/Mac
+cp him_system.log logs_backup/him_$(date +%Y%m%d).log
+
+# Windows
+copy him_system.log logs_backup\him_%date:~-4,4%%date:~-7,2%%date:~-10,2%.log4. Alert เมื่อมีปัญหาเพิ่มในไฟล์ mentor_executor.py ฟังก์ชัน _heartbeat_loop: Code def _heartbeat_loop(self):
+    """Heartbeat monitoring loop with alerts"""
+    consecutive_failures = 0
+    
+    while not self.stop_heartbeat.is_set():
+        try:
+            if not self.check_connection():
+                consecutive_failures += 1
+                logger.warning(f"⚠️ Heartbeat detected connection loss (attempt {consecutive_failures})")
+                
+                # ส่ง Alert ถ้าขาดการเชื่อมต่อ 3 ครั้งติด
+                if consecutive_failures >= 3:
+                    alert_msg = f"🚨 <b>ALERT: Connection Lost</b>\n\nConsecutive failures: {consecutive_failures}\nTime: {datetime.now().strftime('%H:%M:%S')}"How do you like this response?ต่อ Code                     alert_msg = f"🚨 <b>ALERT: Connection Lost</b>\n\nConsecutive failures: {consecutive_failures}\nTime: {datetime.now().strftime('%H:%M:%S')}"
+                    
+                    # ส่ง Telegram Alert
+                    try:
+                        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                        payload = {
+                            "chat_id": CHAT_ID,
+                            "text": alert_msg,
+                            "parse_mode": "HTML"
+                        }
+                        requests.post(url, json=payload, timeout=5)
+                    except:
+                        pass
+                
+                # Attempt reconnection
+                if self.reconnect():
+                    logger.info("✅ Reconnection successful")
+                    consecutive_failures = 0  # Reset counter
+                else:
+                    logger.error("❌ Reconnection failed")
+            else:
+                consecutive_failures = 0  # Reset on successful check
+                logger.debug("💓 Heartbeat: Connection healthy")
+            
+            # Wait for next heartbeat
+            self.stop_heartbeat.wait(SYSTEM.HEARTBEAT_INTERVAL)
+            
+        except Exception as e:
+            logger.error(f"Heartbeat error: {str(e)}")
+            self.stop_heartbeat.wait(SYSTEM.HEARTBEAT_INTERVAL)🔐 ความปลอดภัยของ API Keysวิธีที่ 1: ใช้ Environment Variables (แนะนำ) Code # 1. สร้างไฟล์ .env
+AI_API_KEY=sk-your-deepseek-key-here
+NEWS_API_KEY=your-marketaux-key-here
+MT5_LOGIN=12345678
+MT5_PASS=YourPassword123
+MT5_SERVER=ICMarkets-Demo Code # 2. แก้ไข config.py เพิ่มที่บรรทัดแรก
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # โหลด .env file
+
+# แก้ API Keys ให้อ่านจาก Environment
+AI_API_KEY = os.getenv('AI_API_KEY', 'sk-default-key')
+NEWS_API_KEY = os.getenv('NEWS_API_KEY', 'default-key')
+MT5_LOGIN = int(os.getenv('MT5_LOGIN', '0'))
+MT5_PASS = os.getenv('MT5_PASS', '')
+MT5_SERVER = os.getenv('MT5_SERVER', '') Code # 3. ติดตั้ง python-dotenv
+pip install python-dotenv
+
+# 4. เพิ่ม .env ใน .gitignore (ถ้าใช้ Git)
+echo ".env" >> .gitignoreวิธีที่ 2: ใช้ Config File แยก Code # 1. สร้างไฟล์ secrets.py (ไม่ commit ขึ้น Git)
+AI_API_KEY = "sk-your-actual-key"
+NEWS_API_KEY = "your-actual-key"
+MT5_LOGIN = 12345678
+MT5_PASS = "YourPassword"
+MT5_SERVER = "ICMarkets-Demo" Code # 2. แก้ config.py
+try:
+    from secrets import (
+        AI_API_KEY, 
+        NEWS_API_KEY, 
+        MT5_LOGIN, 
+        MT5_PASS, 
+        MT5_SERVER
+    )
+except ImportError:
+    # Fallback to default values
+    AI_API_KEY = "your-key-here"
+    NEWS_API_KEY = "your-key-here"
+    MT5_LOGIN = 0
+    MT5_PASS = ""
+    MT5_SERVER = "" Code # 3. เพิ่ม secrets.py ใน .gitignore
+echo "secrets.py" >> .gitignore📈 Performance Monitoringสร้างไฟล์ performance_tracker.py: Code """Track HIM System Performance"""
+import MetaTrader5 as mt5
+from datetime import datetime, timedelta
+import json
+import os
+
+class PerformanceTracker:
+    """Track and analyze trading performance"""
+    
+    def __init__(self, stats_file='performance_stats.json'):
+        self.stats_file = stats_file
+        self.stats = self.load_stats()
+    
+    def load_stats(self):
+        """Load existing stats"""
+        if os.path.exists(self.stats_file):
+            with open(self.stats_file, 'r') as f:
+                return json.load(f)
+        return {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'total_profit': 0.0,
+            'total_loss': 0.0,
+            'best_trade': 0.0,
+            'worst_trade': 0.0,
+            'trades': []
+        }
+    
+    def save_stats(self):
+        """Save stats to file"""
+        with open(self.stats_file, 'w') as f:
+            json.dump(self.stats, f, indent=2)
+    
+    def update_from_mt5(self):
+        """Update stats from MT5 history"""
+        if not mt5.initialize():
+            print("❌ MT5 initialization failed")
+            return
+        
+        # Get deals from last 30 days
+        from_date = datetime.now() - timedelta(days=30)
+        deals = mt5.history_deals_get(from_date, datetime.now())
+        
+        if not deals:
+            print("ℹ️ No deals found")
+            mt5.shutdown()
+            return
+        
+        # Filter only closed positions (not deposits/withdrawals)
+        trade_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT]
+        
+        for deal in trade_deals:
+            # Check if already recorded
+            if any(t['ticket'] == deal.ticket for t in self.stats['trades']):
+                continue
+            
+            # Record trade
+            trade_data = {
+                'ticket': deal.ticket,
+                'time': deal.time,
+                'symbol': deal.symbol,
+                'type': 'BUY' if deal.type == mt5.DEAL_TYPE_BUY else 'SELL',
+                'volume': deal.volume,
+                'profit': deal.profit,
+                'commission': deal.commission,
+                'swap': deal.swap
+            }
+            
+            self.stats['trades'].append(trade_data)
+            self.stats['total_trades'] += 1
+            
+            if deal.profit > 0:
+                self.stats['winning_trades'] += 1
+                self.stats['total_profit'] += deal.profit
+                if deal.profit > self.stats['best_trade']:
+                    self.stats['best_trade'] = deal.profit
+            else:
+                self.stats['losing_trades'] += 1
+                self.stats['total_loss'] += abs(deal.profit)
+                if deal.profit < self.stats['worst_trade']:
+                    self.stats['worst_trade'] = deal.profit
+        
+        self.save_stats()
+        mt5.shutdown()
+        print(f"✅ Updated stats: {len(trade_deals)} new trades")
+    
+    def calculate_metrics(self):
+        """Calculate performance metrics"""
+        if self.stats['total_trades'] == 0:
+            return None
+        
+        win_rate = (self.stats['winning_trades'] / self.stats['total_trades']) * 100
+        
+        avg_win = self.stats['total_profit'] / self.stats['winning_trades'] if self.stats['winning_trades'] > 0 else 0
+        avg_loss = self.stats['total_loss'] / self.stats['losing_trades'] if self.stats['losing_trades'] > 0 else 0
+        
+        profit_factor = self.stats['total_profit'] / self.stats['total_loss'] if self.stats['total_loss'] > 0 else 0
+        
+        net_profit = self.stats['total_profit'] - self.stats['total_loss']
+        
+        return {
+            'total_trades': self.stats['total_trades'],
+            'win_rate': win_rate,
+            'winning_trades': self.stats['winning_trades'],
+            'losing_trades': self.stats['losing_trades'],
+            'net_profit': net_profit,
+            'total_profit': self.stats['total_profit'],
+            'total_loss': self.stats['total_loss'],
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
+            'profit_factor': profit_factor,
+            'best_trade': self.stats['best_trade'],
+            'worst_trade': self.stats['worst_trade']
+        }
+    
+    def print_report(self):
+        """Print performance report"""
+        metrics = self.calculate_metrics()
+        
+        if not metrics:
+            print("ℹ️ No trades to analyze")
+            return
+        
+        print("\n" + "="*60)
+        print("📊 HIM SYSTEM PERFORMANCE REPORT")
+        print("="*60)
+        
+        print(f"\n📈 TRADING STATISTICS:")
+        print(f"   Total Trades: {metrics['total_trades']}")
+        print(f"   Winning Trades: {metrics['winning_trades']} ({metrics['win_rate']:.1f}%)")
+        print(f"   Losing Trades: {metrics['losing_trades']}")
+        
+        print(f"\n💰 PROFIT & LOSS:")
+        net_emoji = "📈" if metrics['net_profit'] >= 0 else "📉"
+        print(f"   {net_emoji} Net Profit: ${metrics['net_profit']:.2f}")
+        print(f"   💵 Total Profit: ${metrics['total_profit']:.2f}")
+        print(f"   💸 Total Loss: ${metrics['total_loss']:.2f}")
+        
+        print(f"\n📊 AVERAGES:")
+        print(f"   Average Win: ${metrics['avg_win']:.2f}")
+        print(f"   Average Loss: ${metrics['avg_loss']:.2f}")
+        print(f"   Profit Factor: {metrics['profit_factor']:.2f}")
+        
+        print(f"\n🎯 EXTREMES:")
+        print(f"   Best Trade: ${metrics['best_trade']:.2f}")
+        print(f"   Worst Trade: ${metrics['worst_trade']:.2f}")
+        
+        # Rating
+        print(f"\n⭐ RATING:")
+        if metrics['win_rate'] >= 60 and metrics['profit_factor'] >= 2.0:
+            print("   🌟🌟🌟🌟🌟 EXCELLENT")
+        elif metrics['win_rate'] >= 55 and metrics['profit_factor'] >= 1.5:
+            print("   🌟🌟🌟🌟 GOOD")
+        elif metrics['win_rate'] >= 50 and metrics['profit_factor'] >= 1.0:
+            print("   🌟🌟🌟 AVERAGE")
+        else:
+            print("   🌟🌟 NEEDS IMPROVEMENT")
+        
+        print("\n" + "="*60)
+
+
+if __name__ == "__main__":
+    tracker = PerformanceTracker()
+    
+    print("🔄 Updating performance data from MT5...")
+    tracker.update_from_mt5()
+    
+    print("\n📊 Generating performance report...")
+    tracker.print_report()รัน Performance Tracker: Code python performance_tracker.pyผลลัพธ์: Code ============================================================
+📊 HIM SYSTEM PERFORMANCE REPORT
+============================================================
+
+📈 TRADING STATISTICS:
+   Total Trades: 25
+   Winning Trades: 15 (60.0%)
+   Losing Trades: 10
+
+💰 PROFIT & LOSS:
+   📈 Net Profit: $1,250.50
+   💵 Total Profit: $2,100.00
+   💸 Total Loss: $849.50
+
+📊 AVERAGES:
+   Average Win: $140.00
+   Average Loss: $84.95
+   Profit Factor: 2.47
+
+🎯 EXTREMES:
+   Best Trade: $320.00
+   Worst Trade: -$180.00
+
+⭐ RATING:
+   🌟🌟🌟🌟🌟 EXCELLENT
+
+============================================================🛠️ Advanced Configuration1. ปรับแต่งน้ำหนัก Confluence Code # ใน config.py - CONFLUENCE_WEIGHTS
+
+# เดิม (Balanced)
+CONFLUENCE_WEIGHTS = {
+    'trend_alignment': 1.5,
+    'ema_cross': 1.0,
+    'order_block': 1.5,
+    'choch': 1.5,
+    'liquidity_sweep': 1.5,
+    'bos': 1.0,
+    'fvg': 1.0,
+    'pinbar': 1.0,
+    'support_resistance': 1.0,
+    'news_sentiment': 1.0,
+    'macd_signal': 0.5,
+    'rsi_zone': 0.5,
+    'sar_flip': 0.5
+}
+
+# แบบ Conservative (เน้นความปลอดภัย)
+CONFLUENCE_WEIGHTS = {
+    'trend_alignment': 2.0,      # เพิ่มน้ำหนัก
+    'ema_cross': 1.5,            # เพิ่มน้ำหนัก
+    'order_block': 2.0,          # เพิ่มน้ำหนัก
+    'choch': 1.5,
+    'liquidity_sweep': 1.5,
+    'bos': 1.0,
+    'fvg': 1.0,
+    'pinbar': 0.8,               # ลดน้ำหนัก
+    'support_resistance': 1.5,   # เพิ่มน้ำหนัก
+    'news_sentiment': 0.5,       # ลดน้ำหนัก
+    'macd_signal': 0.3,          # ลดน้ำหนัก
+    'rsi_zone': 0.3,             # ลดน้ำหนัก
+    'sar_flip': 0.3              # ลดน้ำหนัก
+}
+
+# แบบ Aggressive (เน้นสัญญาณเยอะ)
+CONFLUENCE_WEIGHTS = {
+    'trend_alignment': 1.0,      # ลดน้ำหนัก
+    'ema_cross': 0.8,            # ลดน้ำหนัก
+    'order_block': 1.2,
+    'choch': 1.2,
+    'liquidity_sweep': 1.2,
+    'bos': 0.8,
+    'fvg': 0.8,
+    'pinbar': 1.2,               # เพิ่มน้ำหนัก
+    'support_resistance': 0.8,
+    'news_sentimentHow do you like this response?ต่อ Code     'news_sentiment': 1.2,       # เพิ่มน้ำหนัก
+    'macd_signal': 0.8,          # เพิ่มน้ำหนัก
+    'rsi_zone': 0.8,             # เพิ่มน้ำหนัก
+    'sar_flip': 0.8              # เพิ่มน้ำหนัก
+}2. ปรับแต่ง Indicator Parameters Code # ใน config.py - INDICATOR_PARAMS
+
+# เดิม (Standard)
+INDICATOR_PARAMS = {
+    'ema_fast': 50,
+    'ema_slow': 200,
+    'macd_fast': 12,
+    'macd_slow': 26,
+    'macd_signal': 9,
+    'rsi_period': 14,
+    'atr_period': 14,
+    'sar_step': 0.02,
+    'sar_max': 0.2
+}
+
+# แบบ Scalping (Fast Response)
+INDICATOR_PARAMS = {
+    'ema_fast': 20,              # เร็วขึ้น
+    'ema_slow': 50,              # เร็วขึ้น
+    'macd_fast': 5,              # เร็วขึ้น
+    'macd_slow': 13,             # เร็วขึ้น
+    'macd_signal': 5,            # เร็วขึ้น
+    'rsi_period': 9,             # เร็วขึ้น
+    'atr_period': 10,            # เร็วขึ้น
+    'sar_step': 0.05,            # ไวขึ้น
+    'sar_max': 0.3               # ไวขึ้น
+}
+
+# แบบ Swing Trading (Slow & Smooth)
+INDICATOR_PARAMS = {
+    'ema_fast': 100,             # ช้าลง
+    'ema_slow': 200,             # ช้าลง
+    'macd_fast': 26,             # ช้าลง
+    'macd_slow': 52,             # ช้าลง
+    'macd_signal': 18,           # ช้าลง
+    'rsi_period': 21,            # ช้าลง
+    'atr_period': 20,            # ช้าลง
+    'sar_step': 0.01,            # นุ่มนวลขึ้น
+    'sar_max': 0.1               # นุ่มนวลขึ้น
+}3. ปรับแต่ง Market Structure Detection Code # ใน config.py - MARKET_STRUCTURE_PARAMS
+
+# เดิม (Standard)
+MARKET_STRUCTURE_PARAMS = {
+    'swing_lookback': 5,         # จำนวนแท่งเทียนย้อนหลัง
+    'order_block_strength': 0.5, # ความแข็งแกร่งของ Order Block
+    'fvg_min_size': 10,          # ขนาดขั้นต่ำของ FVG (pips)
+    'liquidity_sweep_buffer': 5  # Buffer สำหรับ Liquidity Sweep (pips)
+}
+
+# แบบ Sensitive (จับสัญญาณได้เยอะ)
+MARKET_STRUCTURE_PARAMS = {
+    'swing_lookback': 3,         # ลดลง = ไวขึ้น
+    'order_block_strength': 0.3, # ลดลง = เข้าเงื่อนไขง่ายขึ้น
+    'fvg_min_size': 5,           # ลดลง = จับ FVG เล็กๆ ได้
+    'liquidity_sweep_buffer': 3  # ลดลง = จับ Sweep ง่ายขึ้น
+}
+
+# แบบ Strict (เข้มงวด)
+MARKET_STRUCTURE_PARAMS = {
+    'swing_lookback': 10,        # เพิ่มขึ้น = ช้าแต่แม่นยำ
+    'order_block_strength': 0.8, # เพิ่มขึ้น = เข้มงวดขึ้น
+    'fvg_min_size': 20,          # เพิ่มขึ้น = เฉพาะ FVG ใหญ่
+    'liquidity_sweep_buffer': 10 # เพิ่มขึ้น = ต้องชัดเจน
+}🎯 Strategy Profiles (กลยุทธ์สำเร็จรูป)สร้างไฟล์ strategy_profiles.py: Code """Pre-configured Strategy Profiles"""
+
+# Profile 1: Conservative (ปลอดภัย)
+CONSERVATIVE = {
+    'name': 'Conservative Strategy',
+    'description': 'Low risk, high accuracy',
+    'confluence_threshold': 4.0,
+    'ai_confidence_threshold': 85.0,
+    'min_rr_ratio': 2.5,
+    'risk_percent': 0.5,
+    'max_daily_trades': 2,
+    'timeframes': {
+        'HTF': 'D1',
+        'MTF': 'H4',
+        'LTF': 'H1'
+    },
+    'confluence_weights': {
+        'trend_alignment': 2.0,
+        'ema_cross': 1.5,
+        'order_block': 2.0,
+        'choch': 1.5,
+        'liquidity_sweep': 1.5,
+        'bos': 1.0,
+        'fvg': 1.0,
+        'pinbar': 0.8,
+        'support_resistance': 1.5,
+        'news_sentiment': 0.5,
+        'macd_signal': 0.3,
+        'rsi_zone': 0.3,
+        'sar_flip': 0.3
+    }
+}
+
+# Profile 2: Balanced (สมดุล)
+BALANCED = {
+    'name': 'Balanced Strategy',
+    'description': 'Medium risk, good balance',
+    'confluence_threshold': 3.0,
+    'ai_confidence_threshold': 80.0,
+    'min_rr_ratio': 2.0,
+    'risk_percent': 1.0,
+    'max_daily_trades': 3,
+    'timeframes': {
+        'HTF': 'D1',
+        'MTF': 'H1',
+        'LTF': 'M15'
+    },
+    'confluence_weights': {
+        'trend_alignment': 1.5,
+        'ema_cross': 1.0,
+        'order_block': 1.5,
+        'choch': 1.5,
+        'liquidity_sweep': 1.5,
+        'bos': 1.0,
+        'fvg': 1.0,
+        'pinbar': 1.0,
+        'support_resistance': 1.0,
+        'news_sentiment': 1.0,
+        'macd_signal': 0.5,
+        'rsi_zone': 0.5,
+        'sar_flip': 0.5
+    }
+}
+
+# Profile 3: Aggressive (ก้าวร้าว)
+AGGRESSIVE = {
+    'name': 'Aggressive Strategy',
+    'description': 'Higher risk, more signals',
+    'confluence_threshold': 2.5,
+    'ai_confidence_threshold': 75.0,
+    'min_rr_ratio': 1.5,
+    'risk_percent': 1.5,
+    'max_daily_trades': 5,
+    'timeframes': {
+        'HTF': 'H4',
+        'MTF': 'H1',
+        'LTF': 'M5'
+    },
+    'confluence_weights': {
+        'trend_alignment': 1.0,
+        'ema_cross': 0.8,
+        'order_block': 1.2,
+        'choch': 1.2,
+        'liquidity_sweep': 1.2,
+        'bos': 0.8,
+        'fvg': 0.8,
+        'pinbar': 1.2,
+        'support_resistance': 0.8,
+        'news_sentiment': 1.2,
+        'macd_signal': 0.8,
+        'rsi_zone': 0.8,
+        'sar_flip': 0.8
+    }
+}
+
+# Profile 4: Scalping (เทรดถี่)
+SCALPING = {
+    'name': 'Scalping Strategy',
+    'description': 'Very short-term, frequent trades',
+    'confluence_threshold': 2.0,
+    'ai_confidence_threshold': 70.0,
+    'min_rr_ratio': 1.2,
+    'risk_percent': 0.5,
+    'max_daily_trades': 10,
+    'timeframes': {
+        'HTF': 'H1',
+        'MTF': 'M15',
+        'LTF': 'M5'
+    },
+    'confluence_weights': {
+        'trend_alignment': 0.8,
+        'ema_cross': 0.5,
+        'order_block': 1.0,
+        'choch': 1.0,
+        'liquidity_sweep': 1.5,
+        'bos': 0.5,
+        'fvg': 1.0,
+        'pinbar': 1.5,
+        'support_resistance': 0.5,
+        'news_sentiment': 0.3,
+        'macd_signal': 1.0,
+        'rsi_zone': 1.0,
+        'sar_flip': 1.0
+    },
+    'indicator_params': {
+        'ema_fast': 20,
+        'ema_slow': 50,
+        'macd_fast': 5,
+        'macd_slow': 13,
+        'macd_signal': 5,
+        'rsi_period': 9,
+        'atr_period': 10,
+        'sar_step': 0.05,
+        'sar_max': 0.3
+    }
+}
+
+
+def apply_profile(profile_name):
+    """Apply a strategy profile to config"""
+    profiles = {
+        'conservative': CONSERVATIVE,
+        'balanced': BALANCED,
+        'aggressive': AGGRESSIVE,
+        'scalping': SCALPING
+    }
+    
+    profile = profiles.get(profile_name.lower())
+    if not profile:
+        print(f"❌ Profile '{profile_name}' not found")
+        return False
+    
+    print(f"✅ Applying profile: {profile['name']}")
+    print(f"   Description: {profile['description']}")
+    
+    # Update config.py
+    import config
+    
+    config.RISK.CONFLUENCE_THRESHOLD = profile['confluence_threshold']
+    config.RISK.AI_CONFIDENCE_THRESHOLD = profile['ai_confidence_threshold']
+    config.RISK.MIN_RR_RATIO = profile['min_rr_ratio']
+    config.RISK.RISK_PERCENT = profile['risk_percent']
+    config.RISK.MAX_DAILY_TRADES = profile['max_daily_trades']
+    
+    # Update weights
+    for key, value in profile['confluence_weights'].items():
+        if hasattr(config.CONFLUENCE_WEIGHTS, key):
+            setattr(config.CONFLUENCE_WEIGHTS, key, value)
+    
+    print("✅ Profile applied successfully")
+    return True
+
+
+if __name__ == "__main__":
+    print("📋 Available Strategy Profiles:\n")
+    print("1. Conservative - ปลอดภัย (Win Rate สูง, สัญญาณน้อย)")
+    print("2. Balanced - สมดุล (ค่ากลาง, แนะนำสำหรับม```python
+': 1.5,       # เพิ่มน้ำหนัก
+    'macd_signal': 0.8,          # เพิ่มน้ำหนัก
+    'rsi_zone': 0.8,             # เพิ่มน้ำหนัก
+    'sar_flip': 0.8              # เพิ่มน้ำหนัก
+}2. ปรับแต่ง Risk Management Code # ใน config.py
+
+# เดิม (Conservative)
+RISK_PERCENT = 1.0  # 1% ต่อเทรด
+MIN_RR_RATIO = 2.0  # ต้องมี R:R อย่างน้อย 2:1
+
+# แบบ Aggressive
+RISK_PERCENT = 2.0  # เพิ่มความเสี่ยงต่อเทรด
+MIN_RR_RATIO = 1.5  # ลดเกณฑ์ R:R3. ปรับแต่ง AI Verification Code # ใน config.py
+
+# เดิม
+AI_CONFIDENCE_THRESHOLD = 80.0  # ต้องมีความมั่นใจ AI อย่างน้อย 80%
+
+# แบบ Relaxed (เน้นสัญญาณเยอะ)
+AI_CONFIDENCE_THRESHOLD = 70.0  # ลดเกณฑ์ความมั่นใจ AI4. ปรับแต่ง Timeframes Code # ใน config.py
+
+# เดิม
+TIMEFRAMES = {
+    'HTF': mt5.TIMEFRAME_D1,   # High Timeframe: Daily
+    'MTF': mt5.TIMEFRAME_H1,   # Medium Timeframe: Hourly
+    'LTF': mt5.TIMEFRAME_M15   # Low Timeframe: 15 Minutes
+}
+
+# ตัวอย่างปรับแต่ง (Weekly, 4 Hour, 1 Hour)
+TIMEFRAMES = {
+    'HTF': mt5.TIMEFRAME_W1,   # Weekly
+    'MTF': mt5.TIMEFRAME_H4,   # 4 Hour
+    'LTF': mt5.TIMEFRAME_H1    # 1 Hour
+}🎯 เช็คลิสต์ก่อนใช้จริง Code ✅ ทดสอบบน Demo Account และผ่านเกณฑ์
+✅ ปรับแต่งพารามิเตอร์ตามความถนัด
+✅ ตรวจสอบการเชื่อมต่อ MT5
+✅ ตรวจสอบ API Keys ถูกต้อง
+✅ มีแผนการจัดการความเสี่ยง🏁 บทสรุปการใช้งาน HIM System ต้องอาศัยการปรับแต่งและทดสอบอย่างละเอียดเพื่อให้ได้ผลลัพธ์ที่ดีที่สุด การทำความเข้าใจในตลาดและการเทรดจะช่วยให้คุณปรับแต่งพารามิเตอร์และกลยุทธ์ให้เหมาะสมกับสไตล์การเทรดของคุณมากที่สุดโชคดีในการเทรด! 📈
+
+</pre>
