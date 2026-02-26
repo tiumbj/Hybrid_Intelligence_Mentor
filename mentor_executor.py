@@ -1,17 +1,22 @@
 """
 Mentor Executor - Execution Controller (Production Hardening Phase)
-Version: 2.4.2
+Version: 2.4.3
 
 Changelog:
-- 2.4.2 (2026-02-26):
-  - Observability: when Engine returns direction=NONE, log context reasons:
-      * blocked_by, watch_state, breakout_state/side, bos, retest_ok,
-        proximity_score/side/dist/thr, supertrend_dir/value/ok
-  - CFG_EFFECTIVE: log a focused but complete snapshot including ai/risk/execution/telegram if present
-  - Keep LOCKED rules:
-      * Telegram sends ONLY after final approval (no reject/NONE spam)
-      * Engine = pricing owner, Executor = risk+safety enforcement
-      * AI confirm-only when ai.enabled=true
+- 2.4.3 (2026-02-26):
+  - FIX: BOS source of truth MUST come from pkg["bos"] (never context["bos"])
+  - FIX: supertrend_ok source of truth MUST come from pkg["supertrend_ok"] (never context["supertrend_ok"])
+  - FIX: NONE_REASON["bos"] and NONE_REASON["supertrend_ok"] are always boolean (never None)
+  - RESPECT: ai.enabled (if false -> Technical Gate only; if true -> AI confirm-only)
+  - SAFETY: keep production-safe guardrails (spread, stops/freeze check, dedupe, open position guard)
+  - TELEGRAM: send ONLY after final approval (no reject/NONE spam)
+
+Locked Rules (Do not change):
+- BOS required: if bos=False -> must be blocked (no_bos)
+- Engine = owner of decision data (contract fields live at top-level)
+- Executor MUST NOT use debug context as primary source for BOS/supertrend_ok
+- Telegram sends approved only
+- direction="NONE" => no trade
 
 Notes:
 - This file is a full replacement (No patch).
@@ -19,22 +24,21 @@ Notes:
 
 from __future__ import annotations
 
-import os
 import json
-import time
-import math
 import logging
+import math
+import os
+import time
 import traceback
 from typing import Any, Dict, Optional, Tuple
 
 import MetaTrader5 as mt5
 
-from engine import TradingEngine
 from ai_mentor import AIMentor
+from config_resolver import resolve_effective_config
+from engine import TradingEngine
 from telegram_notifier import TelegramNotifier
 from trade_logger import TradeLogger
-from config_resolver import resolve_effective_config
-
 
 # -----------------------------
 # Logging
@@ -115,15 +119,13 @@ class MentorExecutor:
 
         self.hcfg = HotConfig(self.config_path)
         self.engine = TradingEngine(config_path=self.config_path)
-
         self.ai = AIMentor()
         self.tg = TelegramNotifier(config_path=self.config_path)
         self.tlog = TradeLogger(os.path.join(base_dir, "trade_history.json"))
 
-        # Dedupe/cooldown (separate)
+        # Dedupe/cooldown (Telegram + Execution)
         self._last_tg_sig: Optional[str] = None
         self._last_tg_ts: float = 0.0
-
         self._last_exec_sig: Optional[str] = None
         self._last_exec_ts: float = 0.0
 
@@ -166,11 +168,10 @@ class MentorExecutor:
         return bool(len(pos) > 0)
 
     # -----------------------------
-    # Config snapshot (better visibility)
+    # Config snapshot (audit visibility)
     # -----------------------------
     @staticmethod
     def _cfg_snapshot(cfg_eff: Dict[str, Any]) -> Dict[str, Any]:
-        # Focused but complete enough for auditing
         snap = {
             "mode": cfg_eff.get("mode"),
             "symbol": cfg_eff.get("symbol"),
@@ -180,11 +181,10 @@ class MentorExecutor:
             "min_rr": cfg_eff.get("min_rr"),
             "lot": cfg_eff.get("lot"),
             "timeframes": cfg_eff.get("timeframes"),
-            "atr_period": cfg_eff.get("atr_period"),
-            "atr_sl_mult": cfg_eff.get("atr_sl_mult"),
+            "risk": cfg_eff.get("risk"),
+            "supertrend": cfg_eff.get("supertrend"),
         }
-        # Optional sections if exist
-        for k in ("ai", "risk", "execution", "execution_safety", "telegram"):
+        for k in ("ai", "execution", "execution_safety", "telegram"):
             if k in cfg_eff:
                 snap[k] = cfg_eff.get(k)
         return snap
@@ -199,7 +199,9 @@ class MentorExecutor:
             return float("inf")
         return float((tick.ask - tick.bid) / info.point)
 
-    def _validate_stops_levels(self, symbol: str, direction: str, entry: float, sl: float, tp: float) -> Tuple[bool, str]:
+    def _validate_stops_levels(
+        self, symbol: str, direction: str, entry: float, sl: float, tp: float
+    ) -> Tuple[bool, str]:
         info = self._get_info(symbol)
         point = float(info.point) if info.point else 0.0
         if point <= 0:
@@ -207,7 +209,6 @@ class MentorExecutor:
 
         stops_level_points = int(getattr(info, "trade_stops_level", 0) or 0)
         freeze_level_points = int(getattr(info, "trade_freeze_level", 0) or 0)
-
         min_dist = float(stops_level_points) * point
 
         if direction == "BUY":
@@ -299,8 +300,10 @@ class MentorExecutor:
             raw_lot = risk_amount / risk_per_lot
             lot = _floor_to_step(raw_lot, vol_step)  # floor only (never exceed risk)
             lot = _clamp(lot, vol_min, vol_max)
-
-            return float(lot), f"risk equity={equity:.2f} risk_pct={risk_pct:.4f} risk={risk_amount:.2f} risk_per_1lot={risk_per_lot:.2f}"
+            return float(lot), (
+                f"risk equity={equity:.2f} risk_pct={risk_pct:.4f} risk={risk_amount:.2f} "
+                f"risk_per_1lot={risk_per_lot:.2f}"
+            )
         except Exception as e:
             return float(fallback_lot), f"risk_calc_exception_fallback: {e}"
 
@@ -310,7 +313,6 @@ class MentorExecutor:
     def _telegram_dedupe_ok(self, cfg_eff: Dict[str, Any], sig: str) -> bool:
         tg_cfg = (cfg_eff.get("telegram") or {}) if isinstance(cfg_eff, dict) else {}
         cooldown_sec = _safe_int(tg_cfg.get("cooldown_sec", 900), 900)
-
         now = time.time()
         if self._last_tg_sig == sig and (now - self._last_tg_ts) < cooldown_sec:
             return False
@@ -336,7 +338,6 @@ class MentorExecutor:
     def _execution_dedupe_ok(self, cfg_eff: Dict[str, Any], sig: str) -> bool:
         exec_cfg = (cfg_eff.get("execution") or {}) if isinstance(cfg_eff, dict) else {}
         cooldown_sec = _safe_int(exec_cfg.get("cooldown_sec", 120), 120)
-
         now = time.time()
         if self._last_exec_sig == sig and (now - self._last_exec_ts) < cooldown_sec:
             return False
@@ -345,25 +346,30 @@ class MentorExecutor:
         return True
 
     # -----------------------------
-    # NONE reason tracing (NEW)
+    # NONE reason tracing (TOP-LEVEL CONTRACT)
     # -----------------------------
     @staticmethod
-    def _trace_none_context(pkg: Dict[str, Any]) -> Dict[str, Any]:
+    def _trace_none_reason(pkg: Dict[str, Any]) -> Dict[str, Any]:
         ctx = pkg.get("context", {}) or {}
+
+        # IMPORTANT: BOS/supertrend_ok must come from TOP-LEVEL
+        bos = bool(pkg.get("bos", False))
+        st_ok = bool(pkg.get("supertrend_ok", False))
+
         return {
             "blocked_by": ctx.get("blocked_by"),
             "watch_state": ctx.get("watch_state"),
             "breakout_state": ctx.get("breakout_state"),
             "breakout_side": ctx.get("breakout_side"),
-            "bos": ctx.get("bos"),
-            "retest_ok": ctx.get("retest_ok"),
+            "bos": bos,  # boolean always
+            "retest_ok": bool(ctx.get("retest_ok", False)),
             "proximity_score": ctx.get("proximity_score"),
             "proximity_side": ctx.get("proximity_side"),
             "proximity_best_dist": ctx.get("proximity_best_dist"),
             "threshold_points": ctx.get("breakout_proximity_threshold_points"),
             "supertrend_dir": ctx.get("supertrend_dir"),
             "supertrend_value": ctx.get("supertrend_value"),
-            "supertrend_ok": ctx.get("supertrend_ok"),
+            "supertrend_ok": st_ok,  # boolean always
             "HTF_trend": ctx.get("HTF_trend"),
             "MTF_trend": ctx.get("MTF_trend"),
             "LTF_trend": ctx.get("LTF_trend"),
@@ -371,7 +377,7 @@ class MentorExecutor:
         }
 
     # -----------------------------
-    # Decision: AI / Technical
+    # Decision: Technical Gate (AI disabled)
     # -----------------------------
     @staticmethod
     def _sanity(direction: str, entry: float, sl: float, tp: float) -> bool:
@@ -385,14 +391,13 @@ class MentorExecutor:
         direction = str(pkg.get("direction", "NONE"))
         score = _safe_float(pkg.get("score", 0.0), 0.0)
         rr = _safe_float(pkg.get("rr", 0.0), 0.0)
-
         entry = _safe_float(pkg.get("entry_candidate"), 0.0)
         sl = _safe_float(pkg.get("stop_candidate"), 0.0)
         tp = _safe_float(pkg.get("tp_candidate"), 0.0)
 
-        ctx = pkg.get("context", {}) or {}
-        bos = bool(ctx.get("bos", False))
-        st_ok = bool(ctx.get("supertrend_ok", False))
+        # IMPORTANT: BOS/supertrend_ok must come from TOP-LEVEL
+        bos = bool(pkg.get("bos", False))
+        st_ok = bool(pkg.get("supertrend_ok", False))
 
         min_score = _safe_float(cfg_eff.get("min_score", 7.0), 7.0)
         min_rr = _safe_float(cfg_eff.get("min_rr", 2.0), 2.0)
@@ -415,8 +420,9 @@ class MentorExecutor:
             f"Score={score:.1f} (min={min_score:.1f}), RR={rr:.2f} (min={min_rr:.2f})",
             f"confidence_py={conf_py} (th={conf_th})",
         ]
-
         warnings = []
+        if direction not in ("BUY", "SELL"):
+            warnings.append("Direction is NONE/invalid")
         if not bos:
             warnings.append("BOS required but false")
         if not st_ok:
@@ -441,13 +447,50 @@ class MentorExecutor:
         }
 
     # -----------------------------
+    # Decision: AI confirm-only (ai.enabled=true)
+    # -----------------------------
+    def _ai_confirm_decision(self, pkg: Dict[str, Any], fallback_decision: Dict[str, Any], cfg_eff: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        - ai.enabled=true => call AIMentor.approve_trade()
+        - AIMentor currently reads context["bos"]/context["supertrend_ok"] in repo.
+          To keep contract correct without rewriting ai_mentor.py, we NORMALIZE a copy:
+          inject TOP-LEVEL pkg["bos"]/pkg["supertrend_ok"] into context before sending to AI.
+        - If AI response invalid and ai.fallback_to_technical=true => fallback_decision
+        """
+        ai_cfg = (cfg_eff.get("ai") or {}) if isinstance(cfg_eff, dict) else {}
+        fallback_to_technical = bool(ai_cfg.get("fallback_to_technical", True))
+
+        try:
+            normalized = dict(pkg)
+            ctx = dict((pkg.get("context", {}) or {}))
+            ctx["bos"] = bool(pkg.get("bos", False))
+            ctx["supertrend_ok"] = bool(pkg.get("supertrend_ok", False))
+            normalized["context"] = ctx
+
+            ai_resp = self.ai.approve_trade(normalized)
+            if not AIMentor.validate_response(ai_resp):
+                raise ValueError("AI response failed strict validation")
+
+            return ai_resp
+        except Exception as e:
+            logger.error(f"AI confirm failed: {e}")
+            logger.error(traceback.format_exc())
+            if fallback_to_technical:
+                return fallback_decision
+            # Hard-fail => reject
+            rej = dict(fallback_decision)
+            rej["approved"] = False
+            rej["warnings"] = (rej.get("warnings", "") + "\nAI confirm failed and fallback disabled").strip()
+            return rej
+
+    # -----------------------------
     # Order execution
     # -----------------------------
     def _place_market_order(self, symbol: str, direction: str, lot: float, sl: float, tp: float) -> Dict[str, Any]:
         tick = self._get_tick(symbol)
         price = float(tick.ask if direction == "BUY" else tick.bid)
-        order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
 
+        order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -458,7 +501,7 @@ class MentorExecutor:
             "tp": float(tp),
             "deviation": 30,
             "magic": 20260226,
-            "comment": "HIM v2.4.2",
+            "comment": "HIM v2.4.3",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_FOK,
         }
@@ -488,10 +531,21 @@ class MentorExecutor:
     # Telegram message (approved only)
     # -----------------------------
     @staticmethod
-    def _build_mentor_message(symbol: str, direction: str, pkg: Dict[str, Any], decision: Dict[str, Any], enable_execution: bool, lot: float) -> str:
+    def _build_mentor_message(
+        symbol: str,
+        direction: str,
+        pkg: Dict[str, Any],
+        decision: Dict[str, Any],
+        enable_execution: bool,
+        lot: float,
+    ) -> str:
         ctx = pkg.get("context", {}) or {}
         score = _safe_float(pkg.get("score", 0.0), 0.0)
         rr = _safe_float(pkg.get("rr", 0.0), 0.0)
+
+        # IMPORTANT: BOS/supertrend_ok from TOP-LEVEL
+        bos = bool(pkg.get("bos", False))
+        st_ok = bool(pkg.get("supertrend_ok", False))
 
         confidence = int(decision.get("confidence", 0))
         entry = _safe_float(decision.get("entry", 0.0), 0.0)
@@ -500,7 +554,6 @@ class MentorExecutor:
 
         st_dir = str(ctx.get("supertrend_dir", "NA"))
         st_val = _safe_float(ctx.get("supertrend_value", 0.0), 0.0)
-        st_ok = bool(ctx.get("supertrend_ok", False))
 
         status = "APPROVED"
         if not enable_execution:
@@ -517,8 +570,12 @@ class MentorExecutor:
         msg.append(f"TP: {tp:.2f}")
         msg.append("")
         msg.append("Mentor Explanation")
-        msg.append(f"1) HTF={ctx.get('HTF_trend')} MTF={ctx.get('MTF_trend')} LTF={ctx.get('LTF_trend')} (bias={ctx.get('bias_source')})")
-        msg.append(f"2) BOS={ctx.get('bos')} Retest={ctx.get('retest_ok')} Breakout={ctx.get('breakout_state')}({ctx.get('breakout_side')})")
+        msg.append(
+            f"1) HTF={ctx.get('HTF_trend')} MTF={ctx.get('MTF_trend')} LTF={ctx.get('LTF_trend')} (bias={ctx.get('bias_source')})"
+        )
+        msg.append(
+            f"2) BOS={bos} Retest={bool(ctx.get('retest_ok', False))} Breakout={ctx.get('breakout_state')}({ctx.get('breakout_side')})"
+        )
         msg.append(f"3) SuperTrend dir={st_dir} value={st_val:.2f} ok={st_ok}")
         msg.append(f"4) Score={score:.1f}/10 RR={rr:.2f} blocked_by={ctx.get('blocked_by')}")
         return "\n".join(msg)
@@ -532,7 +589,6 @@ class MentorExecutor:
 
         symbol = str(cfg_eff.get("symbol", "GOLD"))
         enable_execution = bool(cfg_eff.get("enable_execution", False))
-        conf_th = int(cfg_eff.get("confidence_threshold", 75))
 
         ai_cfg = (cfg_eff.get("ai") or {}) if isinstance(cfg_eff, dict) else {}
         ai_enabled = bool(ai_cfg.get("enabled", False))
@@ -547,7 +603,9 @@ class MentorExecutor:
         except Exception as e:
             logger.error(f"CRITICAL: engine failed: {e}")
             logger.error(traceback.format_exc())
-            self.tlog.append({"type": "engine_error", "symbol": symbol, "error": str(e), "traceback": traceback.format_exc()})
+            self.tlog.append(
+                {"type": "engine_error", "symbol": symbol, "error": str(e), "traceback": traceback.format_exc()}
+            )
             return
 
         direction = str(pkg.get("direction", "NONE"))
@@ -555,116 +613,113 @@ class MentorExecutor:
         rr = _safe_float(pkg.get("rr", 0.0), 0.0)
         confidence_py = _safe_int(pkg.get("confidence_py", 0), 0)
 
-        logger.info(f"SIGNAL: {direction} score={score:.1f} rr={rr:.2f} confidence_py={confidence_py}")
+        # IMPORTANT: contract fields at TOP-LEVEL
+        bos = bool(pkg.get("bos", False))
+        st_ok = bool(pkg.get("supertrend_ok", False))
+
+        logger.info(
+            f"SIGNAL: {direction} score={score:.1f} rr={rr:.2f} confidence_py={confidence_py} bos={bos} supertrend_ok={st_ok}"
+        )
         self.tlog.append({"type": "signal", "symbol": symbol, "package": pkg})
 
-        # 2) If NONE, log reasons (NEW)
+        # 2) If NONE, log reasons (approved-only telegram rule: do NOT send)
         if direction not in ("BUY", "SELL"):
-            none_ctx = self._trace_none_context(pkg)
-            logger.info(f"NONE_REASON: {none_ctx}")
-            self.tlog.append({"type": "none_reason", "symbol": symbol, "detail": none_ctx})
+            none_reason = self._trace_none_reason(pkg)
+            logger.info(f"NONE_REASON: {none_reason}")
+            self.tlog.append({"type": "none_reason", "symbol": symbol, "detail": none_reason})
             logger.info("No clear bias. Skip.")
             return
 
-        # 3) Position check
-        if block_if_position_exists and self._positions_exist(symbol):
-            logger.info("Gate: position exists. Skip (no stacking).")
-            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "position_exists"})
-            return
+        # 3) Decide: Technical gate baseline
+        technical_decision = self._technical_gate_decision(cfg_eff, pkg)
 
-        # 4) Spread
-        sp = self._spread_points(symbol)
-        if sp > max_spread_points:
-            logger.info(f"Gate: spread too high ({sp:.1f} > {max_spread_points:.1f} points).")
-            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "spread_too_high", "spread_points": sp})
-            return
-
-        # 5) Decision
+        # 4) Decide: AI confirm-only if enabled
         if ai_enabled:
-            ai_resp = self.ai.approve_trade(pkg)
-            if not AIMentor.validate_response(ai_resp):
-                logger.error("CRITICAL: AI response invalid shape. Skip.")
-                self.tlog.append({"type": "ai_invalid", "symbol": symbol, "package": pkg, "ai_raw": ai_resp})
-                return
-            decision = ai_resp
-            source = "AI"
+            decision = self._ai_confirm_decision(pkg=pkg, fallback_decision=technical_decision, cfg_eff=cfg_eff)
+            decision_mode = "AI_CONFIRM"
         else:
-            decision = self._technical_gate_decision(cfg_eff, pkg)
-            source = "TECHNICAL_GATE"
+            decision = technical_decision
+            decision_mode = "TECHNICAL_GATE"
 
-        approved = bool(decision["approved"])
-        confidence = int(decision["confidence"])
-        entry = float(decision["entry"])
-        sl = float(decision["sl"])
-        tp = float(decision["tp"])
+        approved = bool(decision.get("approved", False))
+        logger.info(f"DECISION({decision_mode}): approved={approved} conf={decision.get('confidence')}")
 
-        logger.info(f"DECISION({source}): approved={approved} confidence={confidence}%")
-        if decision.get("reasoning"):
-            logger.info("REASONING:\n" + str(decision["reasoning"]))
-        if decision.get("warnings"):
-            logger.info("WARNINGS:\n" + str(decision["warnings"]))
+        self.tlog.append({"type": "decision", "symbol": symbol, "mode": decision_mode, "decision": decision})
 
-        self.tlog.append({"type": "decision", "symbol": symbol, "source": source, "decision": decision})
-
-        # 6) Final gates
         if not approved:
-            logger.info("Gate: rejected.")
-            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "not_approved", "source": source})
-            return
-        if confidence < conf_th:
-            logger.info(f"Gate: confidence below threshold ({confidence} < {conf_th}).")
-            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "confidence_below_threshold"})
+            # Telegram: approved-only => do not send
             return
 
-        ok_stops, why = self._validate_stops_levels(symbol, direction, entry, sl, tp)
-        if not ok_stops:
-            logger.info(f"Gate: stops validation failed: {why}")
-            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "stops_validation_failed", "detail": why})
+        # 5) Execution safety hardening (still allow DRY-RUN telegram as "APPROVED (DRY-RUN)")
+        entry = _safe_float(decision.get("entry"), _safe_float(pkg.get("entry_candidate"), 0.0))
+        sl = _safe_float(decision.get("sl"), _safe_float(pkg.get("stop_candidate"), 0.0))
+        tp = _safe_float(decision.get("tp"), _safe_float(pkg.get("tp_candidate"), 0.0))
+
+        # Spread filter
+        spread_pts = self._spread_points(symbol)
+        if spread_pts > max_spread_points:
+            logger.warning(f"BLOCK: spread too high {spread_pts:.1f} > {max_spread_points:.1f}")
+            self.tlog.append({"type": "blocked", "symbol": symbol, "reason": "spread", "spread_points": spread_pts})
             return
 
-        # 7) Lot
-        fallback_lot = float(cfg_eff.get("lot", 0.01) or 0.01)
-        lot, lot_reason = self._calc_lot(cfg_eff, symbol, direction, entry, sl, fallback_lot)
-        logger.info(f"LOT: {lot:.2f} ({lot_reason})")
-        self.tlog.append({"type": "lot_calc", "symbol": symbol, "lot": lot, "detail": lot_reason})
+        # Duplicate protection: open position guard
+        if block_if_position_exists and self._positions_exist(symbol):
+            logger.warning("BLOCK: position exists (duplicate protection).")
+            self.tlog.append({"type": "blocked", "symbol": symbol, "reason": "position_exists"})
+            return
 
-        # 8) Telegram (approved only)
-        tg_sig = f"{symbol}|{direction}|{entry:.2f}|{sl:.2f}|{tp:.2f}|{lot:.2f}"
-        msg = self._build_mentor_message(symbol, direction, pkg, decision, enable_execution=enable_execution, lot=lot)
-        self._safe_send_telegram_trade(cfg_eff, msg, sig=tg_sig)
+        # Stops/freeze check
+        ok_levels, why_levels = self._validate_stops_levels(symbol, direction, entry, sl, tp)
+        if not ok_levels:
+            logger.warning(f"BLOCK: levels invalid: {why_levels}")
+            self.tlog.append({"type": "blocked", "symbol": symbol, "reason": "levels", "detail": why_levels})
+            return
 
-        # 9) Execute
+        # Lot sizing: currently supports dynamic (risk_pct) if configured, else fallback lot from cfg
+        fallback_lot = _safe_float(cfg_eff.get("lot", 0.01), 0.01)
+        lot, lot_note = self._calc_lot(cfg_eff, symbol, direction, entry, sl, fallback_lot=fallback_lot)
+        logger.info(f"LOT: {lot:.2f} ({lot_note})")
+
+        # Execution dedupe
+        sig = f"{symbol}|{direction}|{round(entry,2)}|{round(sl,2)}|{round(tp,2)}|{round(score,1)}|{int(decision.get('confidence',0))}"
+        if not self._execution_dedupe_ok(cfg_eff, sig):
+            logger.warning("BLOCK: execution dedupe/cooldown.")
+            self.tlog.append({"type": "blocked", "symbol": symbol, "reason": "execution_dedupe"})
+            return
+
+        # 6) Telegram: approved-only
+        msg = self._build_mentor_message(symbol, direction, pkg, decision, enable_execution, lot)
+        self._safe_send_telegram_trade(cfg_eff, msg, sig)
+
+        # 7) Execute (if enabled) else dry-run
         if not enable_execution:
-            logger.info("Gate: enable_execution=false (dry-run).")
-            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "execution_disabled"})
+            logger.info("DRY-RUN: enable_execution=false, skipping order_send.")
+            self.tlog.append({"type": "dry_run", "symbol": symbol, "direction": direction, "decision": decision})
             return
 
-        exec_sig = f"{symbol}|{direction}|{entry:.2f}|{sl:.2f}|{tp:.2f}"
-        if not self._execution_dedupe_ok(cfg_eff, exec_sig):
-            logger.info("Gate: execution dedupe/cooldown suppress.")
-            self.tlog.append({"type": "gate_reject", "symbol": symbol, "reason": "exec_dedupe"})
-            return
+        result = self._place_market_order(symbol, direction, lot, sl, tp)
+        logger.info(f"EXEC_RESULT: ok={result.get('ok')} retcode={result.get('retcode')} comment={result.get('comment')}")
+        self.tlog.append({"type": "execution", "symbol": symbol, "direction": direction, "result": result})
 
-        order_res = self._place_market_order(symbol, direction, lot, sl, tp)
-        if order_res.get("ok"):
-            logger.info(f"ORDER OK: ticket={order_res.get('order')} price={order_res.get('price')}")
-        else:
-            logger.error(f"ORDER FAILED: {order_res}")
-
-        self.tlog.append({"type": "order", "symbol": symbol, "direction": direction, "lot": lot, "order_result": order_res})
-
-    def run_loop(self, interval_sec: int = 15) -> None:
-        logger.info("HIM MentorExecutor loop started.")
+    def run_forever(self, interval_sec: int = 10) -> None:
         while True:
             try:
                 self.run_once()
+            except KeyboardInterrupt:
+                logger.info("Stopped by user.")
+                break
             except Exception as e:
-                logger.error(f"CRITICAL LOOP ERROR: {e}")
+                logger.error(f"CRITICAL: executor loop error: {e}")
                 logger.error(traceback.format_exc())
-                self.tlog.append({"type": "loop_error", "error": str(e), "traceback": traceback.format_exc()})
+                self.tlog.append({"type": "executor_error", "error": str(e), "traceback": traceback.format_exc()})
             time.sleep(interval_sec)
 
 
-if __name__ == "__main__":
+def main():
     ex = MentorExecutor()
-    ex.run_loop(interval_sec=15)
+    # One-shot by default (safe for commissioning). Use run_forever() if you want continuous loop.
+    ex.run_once()
+
+
+if __name__ == "__main__":
+    main()

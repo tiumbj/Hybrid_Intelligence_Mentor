@@ -1,0 +1,64 @@
+{
+  "symbol": "GOLD",
+  "direction": "NONE",
+  "entry_candidate": null,
+  "stop_candidate": null,
+  "tp_candidate": null,
+  "rr": 0.0,
+  "score": 0.0,
+  "confidence_py": 4,
+  "bos": false,
+  "supertrend_ok": false,
+  "context": {
+    "HTF_trend": "bullish",
+    "MTF_trend": "bearish",
+    "LTF_trend": "bearish",
+    "bias_source": "HTF",
+    "bos_ref_high": 5190.64,
+    "bos_ref_low": 5167.73,
+    "bos_ref": 5190.64,
+    "distance_buy": 7.660000000000764,
+    "distance_sell": 15.25,
+    "atr": 8.935778044219541,
+    "atr_period": 14,
+    "atr_sl_mult": 1.8,
+    "min_rr": 2.0,
+    "breakout_proximity_min_score": 12.0,
+    "breakout_proximity_threshold_atr": 1.0,
+    "breakout_proximity_threshold_mode": "ATR",
+    "breakout_proximity_threshold_points": 8.935778044219541,
+    "proximity_score": 14.277190390198468,
+    "proximity_side": "BUY",
+    "proximity_best_dist": 7.660000000000764,
+    "breakout_state": "NONE",
+    "breakout_side": null,
+    "breakout_overshoot_points": null,
+    "retest_atr_mult": 0.35,
+    "retest_band": 3.1275223154768392,
+    "retest_ok": false,
+    "supertrend_period": 10,
+    "supertrend_mult": 3.0,
+    "supertrend_dir": "bearish",
+    "supertrend_value": 5202.787901552068,
+    "supertrend_ok": false,
+    "watch_state": "WATCH_PROXIMITY",
+    "blocked_by": "supertrend_conflict",
+    "timeframes": {
+      "htf": "H4",
+      "mtf": "H1",
+      "ltf": "M15"
+    },
+    "structure_sensitivity": {
+      "htf": 5,
+      "mtf": 4,
+      "ltf": 3
+    }
+  }
+}
+PS C:\Hybrid_Intelligence_Mentor> python mentor_executor.py
+✅ AI Mentor (Mock Mode) - STRICT JSON ONLY
+2026-02-26 16:42:20,354 | INFO | MT5 Connected
+2026-02-26 16:42:20,360 | INFO | CFG_EFFECTIVE: {'mode': 'B', 'symbol': 'GOLD', 'enable_execution': False, 'confidence_threshold': 75, 'min_score': 7.0, 'min_rr': 2.0, 'lot': 0.01, 'timeframes': {'htf': 'H4', 'mtf': 'H1', 'ltf': 'M15'}, 'risk': {'atr_period': 14, 'atr_sl_mult': 1.8}, 'supertrend': {'period': 10, 'multiplier': 3.0}, 'ai': {'api_key_env': 'DEEPSEEK_API_KEY', 'timeout_seconds': 10, 'retry_attempts': 3, 'fallback_to_technical': True, 'enabled': False, 'provider': 'openai', 'model': ''}, 'telegram': {'enabled': True, 'token_env': 'TELEGRAM_BOT_TOKEN', 'chat_id_env': 'TELEGRAM_CHAT_ID', 'notify_on': ['signal', 'trade', 'error']}}
+2026-02-26 16:42:20,398 | INFO | SIGNAL: NONE score=0.0 rr=0.00 confidence_py=4 bos=False supertrend_ok=False
+2026-02-26 16:42:20,698 | INFO | NONE_REASON: {'blocked_by': 'supertrend_conflict', 'watch_state': 'NONE', 'breakout_state': 'NONE', 'breakout_side': None, 'bos': False, 'retest_ok': False, 'proximity_score': 7.226880983657871, 'proximity_side': 'BUY', 'proximity_best_dist': 8.289999999999964, 'threshold_points': 8.935778044219541, 'supertrend_dir': 'bearish', 'supertrend_value': 5202.787901552068, 'supertrend_ok': False, 'HTF_trend': 'bullish', 'MTF_trend': 'bearish', 'LTF_trend': 'bearish', 'bias_source': 'HTF'}
+2026-02-26 16:42:21,002 | INFO | No clear bias. Skip.
