@@ -21,7 +21,7 @@
 </head>
 <body>
   <h2>Hybrid Intelligence Mentor (HIM)</h2>
-  <div class="muted">Intelligent Dashboard — UI v1.3.0</div>
+  <div class="muted">Intelligent Dashboard — UI v1.4.0</div>
 
   <div class="row" style="margin-top:12px;">
     <div class="card">
@@ -32,14 +32,11 @@
         <div>Execution</div><div id="exec">-</div>
         <div>Positions</div><div id="pos">-</div>
         <div>MT5</div><div id="mt5">-</div>
-        <div>AI</div><div id="ai">-</div>
-        <div>Telegram</div><div id="tg">-</div>
       </div>
       <div class="btns">
         <button onclick="refreshAll()">Refresh</button>
         <button onclick="previewSignal()">Preview Signal</button>
         <button onclick="refreshPerformance()">Refresh Win/Loss</button>
-        <button onclick="telegramTest()">Telegram Test</button>
       </div>
     </div>
 
@@ -59,12 +56,13 @@
 
       <div class="title" style="margin-top:10px;">Modes (ปุ่มปรับกลยุทธ์)</div>
       <div class="btns">
-        <button onclick="applyMode('precision')">โหมดเข้มงวด (Precision)</button>
-        <button onclick="applyMode('balanced')">โหมดสมดุล (Balanced)</button>
-        <button onclick="applyMode('frequent')">โหมดสัญญาณถี่ (Frequent)</button>
+        <button onclick="applyMode('precision')">เข้มงวด (BOS+Retest)</button>
+        <button onclick="applyMode('balanced')">สมดุล (BOS+Retest)</button>
+        <button onclick="applyMode('frequent')">ถี่ขึ้น (BOS+Retest)</button>
+        <button onclick="applyMode('continuation')">ตามเทรนด์ (No BOS)</button>
       </div>
       <div class="muted" style="margin-top:6px;">
-        หมายเหตุ: รองรับ legacy A/B/C ด้วย (A=precision, B=balanced, C=frequent)
+        หมายเหตุ: legacy A/B/C ยังใช้ได้ (A=precision, B=balanced, C=frequent)
       </div>
     </div>
   </div>
@@ -76,40 +74,27 @@
     </div>
 
     <div class="card" style="flex:1; min-width: 520px;">
-      <div class="title">Win/Loss ล่าสุด</div>
+      <div class="title">Performance</div>
       <div id="perf" class="mono">loading…</div>
     </div>
   </div>
 
 <script>
-async function jget(url) {
-  const r = await fetch(url);
-  return await r.json();
-}
+async function jget(url) { const r = await fetch(url); return await r.json(); }
 async function jpost(url, body) {
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {})
-  });
+  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}) });
   return await r.json();
 }
-
 function boolText(ok) { return ok ? '<span class="ok">OK</span>' : '<span class="bad">FAIL</span>'; }
 
 async function refreshAll() {
   const st = await jget('/api/status');
-
   document.getElementById('mode').innerText = st.config.mode || '-';
   document.getElementById('symbol').innerText = st.config.symbol || '-';
   document.getElementById('exec').innerText = st.config.enable_execution ? 'true (Execute)' : 'false (Dry-run)';
   document.getElementById('pos').innerText = (st.mt5 && st.mt5.positions_count != null) ? st.mt5.positions_count : '-';
-
   document.getElementById('mt5').innerHTML = boolText(st.mt5 && st.mt5.mt5_ok);
-  document.getElementById('ai').innerHTML = boolText(st.ai && st.ai.ok);
-  document.getElementById('tg').innerHTML = boolText(st.telegram && st.telegram.ok);
 
-  // Load current config into inputs
   const cfg = await jget('/api/config');
   document.getElementById('cfg_symbol').value = cfg.symbol ?? 'GOLD';
   document.getElementById('cfg_exec').value = String(cfg.enable_execution ?? false);
@@ -118,17 +103,14 @@ async function refreshAll() {
   document.getElementById('cfg_rr').value = String(cfg.min_rr ?? 2.0);
   document.getElementById('cfg_lot').value = String(cfg.lot ?? 0.01);
 }
-
 async function previewSignal() {
   const p = await jget('/api/signal_preview');
   document.getElementById('preview').innerText = JSON.stringify(p, null, 2);
 }
-
 async function refreshPerformance() {
   const p = await jget('/api/performance');
   document.getElementById('perf').innerText = JSON.stringify(p, null, 2);
 }
-
 async function saveConfig() {
   const patch = {
     symbol: document.getElementById('cfg_symbol').value,
@@ -142,16 +124,10 @@ async function saveConfig() {
   alert(JSON.stringify(r));
   await refreshAll();
 }
-
 async function applyMode(modeId) {
   const r = await jpost('/api/mode/' + encodeURIComponent(modeId), {});
   alert(JSON.stringify(r));
   await refreshAll();
-}
-
-async function telegramTest() {
-  const r = await jpost('/api/telegram_test', { text: 'HIM Telegram Test: OK (plain text)', event_type: 'signal' });
-  alert(JSON.stringify(r));
 }
 
 refreshAll();

@@ -1,29 +1,18 @@
 """
 Hybrid Intelligence Mentor (HIM) Trading Engine
-Version: 2.8.0
+Version: 2.9.0
 
 Changelog:
-- 2.8.0 (2026-02-26):
-  - ADD: Intelligent Dashboard knobs (breakout.*) to control strategy by mode buttons:
-      breakout.confirm_buffer_atr
-      breakout.require_retest
-      breakout.retest_band_atr
-      breakout.proximity_threshold_atr
-      breakout.proximity_min_score
-  - FIX: BOS confirmation uses buffer ATR (optional) instead of strict pivot break only
-  - FIX: Proximity threshold now supports ATR-based default via breakout.proximity_threshold_atr
-  - ENFORCE: Option C completeness (if require_retest=True -> block when bos=True but retest_ok=False)
-  - COMPAT: fallback to legacy keys:
-      breakout_proximity.{threshold_atr, threshold, min_score}
-      entry_model.retest_atr_mult
-      supertrend.{multiplier,mult}
-  - KEEP: Real SuperTrend (ATR-based) on LTF
-  - KEEP: counter_breakout block + watch_state
-  - KEEP: contract gating (blocked -> direction NONE, candidates None)
-
-SuperTrend (ศัพท์):
-- ATR (Average True Range) = ค่าแกว่งตัวเฉลี่ย
-- SuperTrend = เส้นตามเทรนด์ (ATR*multiplier) ใช้บอก bullish/bearish
+- 2.9.0 (2026-02-26):
+  - ADD: Continuation Mode (No BOS) driven by config:
+      mode == "continuation" AND continuation.enabled == True
+    Rules:
+      - Require MTF + LTF aligned with direction_bias (user choice #1)
+      - Allow HTF ranging, but block if HTF is opposite (require_htf_not_opposite=True)
+      - Require supertrend_ok, proximity, rr>=min_rr
+  - KEEP: Option C (BOS+Proximity+Retest) for precision/balanced/frequent modes
+  - KEEP: BOS confirm uses ATR buffer (breakout.confirm_buffer_atr)
+  - KEEP: contract: top-level bos + supertrend_ok booleans always
 """
 
 from __future__ import annotations
@@ -43,9 +32,6 @@ class TradingEngine:
         self.config_path = config_path
         self.cfg = self.load_config()
 
-    # -------------------------
-    # Safe utilities
-    # -------------------------
     @staticmethod
     def safe_float(v: Any, default: float = 0.0) -> float:
         if v is None:
@@ -68,9 +54,6 @@ class TradingEngine:
     def clamp(x: float, lo: float, hi: float) -> float:
         return float(max(lo, min(hi, x)))
 
-    # -------------------------
-    # Config
-    # -------------------------
     def load_config(self) -> Dict[str, Any]:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
@@ -85,9 +68,6 @@ class TradingEngine:
         self.cfg = self.load_config()
         return self.cfg
 
-    # -------------------------
-    # MT5 + Data
-    # -------------------------
     def ensure_mt5(self) -> Tuple[bool, str]:
         try:
             if mt5.terminal_info() is not None:
@@ -136,51 +116,36 @@ class TradingEngine:
             rates = fetch_once()
 
         if rates is None:
-            raise RuntimeError(
-                f"copy_rates_none: symbol={symbol} tf={timeframe} bars={bars} last_error={mt5.last_error()}"
-            )
+            raise RuntimeError(f"copy_rates_none: {symbol} tf={timeframe} bars={bars} last_error={mt5.last_error()}")
         if len(rates) < 200:
-            raise RuntimeError(f"not_enough_bars: got={len(rates)} need>=200 symbol={symbol} tf={timeframe}")
+            raise RuntimeError(f"not_enough_bars: got={len(rates)} need>=200 symbol={symbol}")
         return rates
 
-    # -------------------------
-    # ATR (EMA-style)
-    # -------------------------
     def atr(self, high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
         period = max(1, int(period))
         prev_close = np.roll(close, 1)
         prev_close[0] = close[0]
         tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
-
         out = np.zeros(len(close), dtype=float)
         alpha = 1.0 / period
         for i in range(1, len(close)):
             out[i] = out[i - 1] * (1 - alpha) + tr[i] * alpha
         return out
 
-    # -------------------------
-    # SuperTrend
-    # -------------------------
     def supertrend(self, high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int, mult: float):
-        """
-        Returns:
-        - st: SuperTrend line values
-        - dir_arr: +1 bullish, -1 bearish
-        """
         n = len(close)
         period = max(1, int(period))
         mult = float(max(mult, 0.1))
 
         atr = self.atr(high, low, close, period)
         hl2 = (high + low) / 2.0
-
         upper = hl2 + mult * atr
         lower = hl2 - mult * atr
 
         f_upper = np.copy(upper)
         f_lower = np.copy(lower)
 
-        dir_arr = np.ones(n, dtype=int)  # start bullish
+        dir_arr = np.ones(n, dtype=int)
         st = np.zeros(n, dtype=float)
 
         for i in range(1, n):
@@ -204,9 +169,6 @@ class TradingEngine:
         st[0] = hl2[0]
         return st, dir_arr
 
-    # -------------------------
-    # STRUCTURE (pivots)
-    # -------------------------
     def structure(self, data, sens: int) -> Tuple[str, Optional[float], Optional[float]]:
         high = data["high"]
         low = data["low"]
@@ -232,32 +194,23 @@ class TradingEngine:
 
         return trend, last_hi, last_lo
 
-    # -------------------------
-    # Proximity Score
-    # -------------------------
     def proximity_score(self, dist_buy: Optional[float], dist_sell: Optional[float], threshold_points: float):
         thr = max(self.safe_float(threshold_points, 0.0), 1e-9)
         best: Optional[float] = None
         side: Optional[str] = None
 
         if dist_buy is not None:
-            try:
-                db = float(dist_buy)
-                if db >= 0:
-                    best = db
-                    side = "BUY"
-            except Exception:
-                pass
+            db = float(dist_buy)
+            if db >= 0:
+                best = db
+                side = "BUY"
 
         if dist_sell is not None:
-            try:
-                ds = float(dist_sell)
-                if ds >= 0:
-                    if best is None or ds < best:
-                        best = ds
-                        side = "SELL"
-            except Exception:
-                pass
+            ds = float(dist_sell)
+            if ds >= 0:
+                if best is None or ds < best:
+                    best = ds
+                    side = "SELL"
 
         if best is None:
             return 0.0, None, None
@@ -265,141 +218,65 @@ class TradingEngine:
         score = 100.0 * max(0.0, min(1.0, (thr - best) / thr))
         return float(score), side, float(best)
 
-    # -------------------------
-    # Score + Confidence
-    # -------------------------
-    def compute_score_0_10(
-        self,
-        direction: str,
-        htf_trend: str,
-        bos: bool,
-        prox_score_0_100: float,
-        retest_ok: bool,
-        overshoot_points: Optional[float],
-        threshold_points: float,
-        blocked: bool,
-    ) -> float:
-        s = 0.0
-
-        align = 0.0
-        if direction == "BUY" and htf_trend == "bullish":
-            align = 1.0
-        elif direction == "SELL" and htf_trend == "bearish":
-            align = 1.0
-        s += 2.0 * align
-
-        s += 2.5 if bos else 0.0
-
-        ps = self.clamp(self.safe_float(prox_score_0_100, 0.0) / 100.0, 0.0, 1.0)
-        s += 2.0 * ps
-
-        s += 1.5 if retest_ok else 0.0
-
-        og = 0.0
-        if overshoot_points is not None:
-            thr = max(self.safe_float(threshold_points, 0.0), 1e-9)
-            ratio = self.clamp(float(overshoot_points) / thr, 0.0, 2.0)
-            og = 1.0 - self.clamp(ratio / 2.0, 0.0, 1.0)
-        s += 1.0 * og
-
-        if blocked:
-            s -= 3.0
-
-        return self.clamp(s, 0.0, 10.0)
-
-    def compute_confidence_0_100(self, score_0_10: float, bos: bool, retest_ok: bool, align: bool) -> int:
-        score100 = self.clamp(score_0_10 * 10.0, 0.0, 100.0)
-        base = score100 * 0.85
-        bonus = 0.0
-        if bos:
-            bonus += 8.0
-        if retest_ok:
-            bonus += 5.0
-        if align:
-            bonus += 4.0
-        return int(round(self.clamp(base + bonus, 0.0, 100.0)))
-
-    # -------------------------
-    # Config access helpers (compat)
-    # -------------------------
     def _get_breakout_knobs(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Priority: breakout.* (new) -> legacy breakout_proximity / entry_model fallbacks
-        """
-        breakout = cfg.get("breakout", {}) or {}
-        prox_legacy = cfg.get("breakout_proximity", {}) or {}
-        entry_legacy = cfg.get("entry_model", {}) or {}
-
-        confirm_buffer_atr = self.safe_float(breakout.get("confirm_buffer_atr"), 0.0)
-
-        require_retest = breakout.get("require_retest")
-        if require_retest is None:
-            require_retest = True
-        require_retest = bool(require_retest)
-
-        retest_band_atr = breakout.get("retest_band_atr")
-        if retest_band_atr is None:
-            # legacy name in old engine
-            retest_band_atr = entry_legacy.get("retest_atr_mult")
-        retest_band_atr = self.safe_float(retest_band_atr, 0.25)
-
-        # proximity knobs
-        prox_thr_atr = breakout.get("proximity_threshold_atr")
-        if prox_thr_atr is None:
-            prox_thr_atr = prox_legacy.get("threshold_atr")
-        prox_thr_atr = self.safe_float(prox_thr_atr, 0.8)
-
-        prox_min_score = breakout.get("proximity_min_score")
-        if prox_min_score is None:
-            prox_min_score = prox_legacy.get("min_score")
-        prox_min_score = self.safe_float(prox_min_score, 50.0)
-
-        # legacy absolute points fallback (rare)
-        prox_thr_points = prox_legacy.get("threshold")
-        prox_thr_points = self.safe_float(prox_thr_points, 0.0)
-
+        b = cfg.get("breakout", {}) or {}
+        confirm_buffer_atr = self.safe_float(b.get("confirm_buffer_atr"), 0.05)
+        require_retest = bool(b.get("require_retest", True))
+        retest_band_atr = self.safe_float(b.get("retest_band_atr"), 0.30)
+        prox_thr_atr = self.safe_float(b.get("proximity_threshold_atr"), 1.50)
+        prox_min_score = self.safe_float(b.get("proximity_min_score"), 10.0)
         return {
-            "confirm_buffer_atr": float(max(confirm_buffer_atr, 0.0)),
-            "require_retest": bool(require_retest),
-            "retest_band_atr": float(max(retest_band_atr, 0.0)),
-            "proximity_threshold_atr": float(max(prox_thr_atr, 0.0)),
-            "proximity_min_score": float(self.clamp(prox_min_score, 0.0, 100.0)),
-            "legacy_threshold_points": float(max(prox_thr_points, 0.0)),
+            "confirm_buffer_atr": max(confirm_buffer_atr, 0.0),
+            "require_retest": require_retest,
+            "retest_band_atr": max(retest_band_atr, 0.0),
+            "proximity_threshold_atr": max(prox_thr_atr, 0.0),
+            "proximity_min_score": self.clamp(prox_min_score, 0.0, 100.0),
         }
 
-    # -------------------------
-    # MAIN
-    # -------------------------
+    def _get_continuation_knobs(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        c = cfg.get("continuation", {}) or {}
+        enabled = bool(c.get("enabled", False))
+        req_align = bool(c.get("require_mtf_ltf_align", True))
+        req_htf_not_opposite = bool(c.get("require_htf_not_opposite", True))
+        prox_thr_atr = self.safe_float(c.get("proximity_threshold_atr"), 1.80)
+        prox_min_score = float(self.safe_int(c.get("proximity_min_score"), 20))
+        return {
+            "enabled": enabled,
+            "require_mtf_ltf_align": req_align,
+            "require_htf_not_opposite": req_htf_not_opposite,
+            "proximity_threshold_atr": max(prox_thr_atr, 0.0),
+            "proximity_min_score": self.clamp(float(prox_min_score), 0.0, 100.0),
+        }
+
     def generate_signal_package(self) -> Dict[str, Any]:
         cfg = self.reload_config()
 
         symbol = str(cfg.get("symbol", "GOLD"))
+        mode = str(cfg.get("mode", "balanced")).strip().lower()
+
         tf_cfg = cfg.get("timeframes", {}) or {}
-        sens_cfg = cfg.get("structure_sensitivity", {}) or {}
         risk_cfg = cfg.get("risk", {}) or {}
         st_cfg = cfg.get("supertrend", {}) or {}
+        sens_cfg = cfg.get("structure_sensitivity", {}) or {}
 
-        knobs = self._get_breakout_knobs(cfg)
-
-        min_rr = self.safe_float(cfg.get("min_rr", 2.0), 2.0)
+        atr_period = self.safe_int(risk_cfg.get("atr_period", 14), 14)
         atr_sl_mult = self.safe_float(risk_cfg.get("atr_sl_mult", 1.8), 1.8)
+        min_rr = self.safe_float(cfg.get("min_rr", 2.0), 2.0)
+
+        st_period = self.safe_int(st_cfg.get("period", 10), 10)
+        st_mult = st_cfg.get("multiplier", st_cfg.get("mult", 3.0))
+        st_mult = self.safe_float(st_mult, 3.0)
 
         htf = str(tf_cfg.get("htf", "H4"))
         mtf = str(tf_cfg.get("mtf", "H1"))
         ltf = str(tf_cfg.get("ltf", "M15"))
 
-        sens_htf = self.safe_int(sens_cfg.get("htf"), 5)
-        sens_mtf = self.safe_int(sens_cfg.get("mtf"), 4)
-        sens_ltf = self.safe_int(sens_cfg.get("ltf"), 3)
+        sens_htf = self.safe_int(sens_cfg.get("htf", 5), 5)
+        sens_mtf = self.safe_int(sens_cfg.get("mtf", 4), 4)
+        sens_ltf = self.safe_int(sens_cfg.get("ltf", 3), 3)
 
-        atr_period = self.safe_int(risk_cfg.get("atr_period", 14), 14)
-
-        # SuperTrend params (compat: multiplier/mult)
-        st_period = self.safe_int(st_cfg.get("period", 10), 10)
-        st_mult = st_cfg.get("multiplier", None)
-        if st_mult is None:
-            st_mult = st_cfg.get("mult", None)
-        st_mult = self.safe_float(st_mult, 3.0)
+        breakout_knobs = self._get_breakout_knobs(cfg)
+        cont_knobs = self._get_continuation_knobs(cfg)
 
         blocked_reasons = []
         watch_state = "NONE"
@@ -420,31 +297,27 @@ class TradingEngine:
                 "confidence_py": 0,
                 "bos": False,
                 "supertrend_ok": False,
-                "context": {
-                    "blocked_by": "no_data",
-                    "error": str(e),
-                    "timeframes": {"htf": htf, "mtf": mtf, "ltf": ltf},
-                },
+                "context": {"blocked_by": "no_data", "error": str(e)},
             }
 
         htf_trend, _, _ = self.structure(htf_data, sens_htf)
         mtf_trend, _, _ = self.structure(mtf_data, sens_mtf)
         ltf_trend, bos_hi, bos_lo = self.structure(ltf_data, sens_ltf)
 
-        # Bias (owner: engine)
-        direction = "NONE"
+        # Bias owner (engine)
+        direction_bias = "NONE"
         bias_source = "NO_CLEAR_BIAS"
         if htf_trend == "bullish":
-            direction = "BUY"
+            direction_bias = "BUY"
             bias_source = "HTF"
         elif htf_trend == "bearish":
-            direction = "SELL"
+            direction_bias = "SELL"
             bias_source = "HTF"
         elif mtf_trend == "bullish":
-            direction = "BUY"
+            direction_bias = "BUY"
             bias_source = "MTF_FALLBACK"
         elif mtf_trend == "bearish":
-            direction = "SELL"
+            direction_bias = "SELL"
             bias_source = "MTF_FALLBACK"
         else:
             blocked_reasons.append("no_clear_bias")
@@ -457,54 +330,46 @@ class TradingEngine:
         atr_arr = self.atr(high, low, close, atr_period)
         atr_val = float(atr_arr[-1]) if len(atr_arr) else 0.0
 
-        # SuperTrend (REAL)
         st_line, st_dir_arr = self.supertrend(high, low, close, st_period, st_mult)
         st_dir = "bullish" if int(st_dir_arr[-1]) == 1 else "bearish"
         st_value = float(st_line[-1])
 
+        # SuperTrend gate relative to bias
         supertrend_ok = False
-        if direction == "BUY" and st_dir == "bullish":
+        if direction_bias == "BUY" and st_dir == "bullish":
             supertrend_ok = True
-        elif direction == "SELL" and st_dir == "bearish":
+        elif direction_bias == "SELL" and st_dir == "bearish":
             supertrend_ok = True
 
-        if direction in ("BUY", "SELL") and not supertrend_ok:
+        if direction_bias in ("BUY", "SELL") and not supertrend_ok:
             blocked_reasons.append("supertrend_conflict")
 
-        # Proximity threshold points:
-        # - Prefer ATR-based breakout.proximity_threshold_atr
-        # - If ATR not available or knob=0, fallback legacy absolute points if provided
-        threshold_mode = "ATR"
-        threshold_atr_out = None
-        if atr_val > 0 and knobs["proximity_threshold_atr"] > 0:
-            threshold_points = float(atr_val * float(knobs["proximity_threshold_atr"]))
-            threshold_atr_out = float(knobs["proximity_threshold_atr"])
-        else:
-            threshold_points = float(max(knobs["legacy_threshold_points"], 2.5))
-            threshold_mode = "POINTS"
-        threshold_points = max(float(threshold_points), 1e-9)
-
-        # Distances to structure refs
+        # Distances to refs
         dist_buy = (float(bos_hi) - ltf_close) if bos_hi is not None else None
         dist_sell = (ltf_close - float(bos_lo)) if bos_lo is not None else None
 
-        # Breakout confirm with ATR buffer:
-        # BUY breakout when close > bos_hi + buffer
-        # SELL breakout when close < bos_lo - buffer
-        confirm_buffer_points = float(max(atr_val * knobs["confirm_buffer_atr"], 0.0)) if atr_val > 0 else 0.0
+        # Choose proximity threshold by mode:
+        # - continuation uses continuation.proximity_threshold_atr
+        # - otherwise uses breakout.proximity_threshold_atr
+        prox_thr_atr = cont_knobs["proximity_threshold_atr"] if (mode == "continuation" and cont_knobs["enabled"]) else breakout_knobs["proximity_threshold_atr"]
+        threshold_points = float(atr_val * prox_thr_atr) if (atr_val > 0 and prox_thr_atr > 0) else 1e-9
+        threshold_points = max(threshold_points, 1e-9)
+
+        prox_score, prox_side, prox_best_dist = self.proximity_score(dist_buy, dist_sell, threshold_points)
+
+        # Watch state
+        if prox_side in ("BUY", "SELL") and prox_score >= 10:
+            watch_state = "WATCH_PROXIMITY"
+
+        # BOS confirm (Option C)
+        confirm_buffer_points = float(max(atr_val * breakout_knobs["confirm_buffer_atr"], 0.0)) if atr_val > 0 else 0.0
 
         breakout_state = "NONE"
         breakout_side = None
         breakout_overshoot_points = None
 
-        # Overshoot measured beyond pivot+buffer (>=0 means breakout)
-        buy_overshoot = None
-        sell_overshoot = None
-
-        if bos_hi is not None:
-            buy_overshoot = float(ltf_close - (float(bos_hi) + confirm_buffer_points))
-        if bos_lo is not None:
-            sell_overshoot = float((float(bos_lo) - confirm_buffer_points) - ltf_close)
+        buy_overshoot = float(ltf_close - (float(bos_hi) + confirm_buffer_points)) if bos_hi is not None else None
+        sell_overshoot = float((float(bos_lo) - confirm_buffer_points) - ltf_close) if bos_lo is not None else None
 
         if buy_overshoot is not None and buy_overshoot > 0:
             breakout_state = "BREAKOUT_BUY_CONFIRMED"
@@ -515,76 +380,78 @@ class TradingEngine:
             breakout_side = "SELL"
             breakout_overshoot_points = float(sell_overshoot)
 
-        # Conflict block: opposite breakout exists vs bias direction
-        if breakout_side in ("BUY", "SELL") and direction in ("BUY", "SELL") and breakout_side != direction:
-            blocked_reasons.append("counter_breakout")
-            watch_state = "WATCH_COUNTER_BREAKOUT"
+        bos = bool(breakout_side == direction_bias and breakout_state.startswith("BREAKOUT_"))
 
-        bos = bool(breakout_side == direction and breakout_state.startswith("BREAKOUT_"))
-
-        # Proximity score (distance to pivot refs, not buffer)
-        prox_score, prox_side, prox_best_dist = self.proximity_score(dist_buy, dist_sell, threshold_points)
-        prox_min_score = float(knobs["proximity_min_score"])
-        if watch_state == "NONE" and prox_score >= prox_min_score and prox_side in ("BUY", "SELL"):
-            watch_state = "WATCH_PROXIMITY"
-
-        # Retest reference
-        bos_ref = None
-        if direction == "BUY":
-            bos_ref = bos_hi
-        elif direction == "SELL":
-            bos_ref = bos_lo
-
-        # Retest band points (ATR based)
-        retest_band = float(max(atr_val * knobs["retest_band_atr"], 1e-9)) if atr_val > 0 else 1e-9
+        # Retest (Option C)
+        bos_ref = bos_hi if direction_bias == "BUY" else (bos_lo if direction_bias == "SELL" else None)
+        retest_band = float(max(atr_val * breakout_knobs["retest_band_atr"], 1e-9)) if atr_val > 0 else 1e-9
         retest_ok = False
-        if bos_ref is not None and direction in ("BUY", "SELL"):
+        if bos_ref is not None and direction_bias in ("BUY", "SELL"):
             retest_ok = bool(abs(ltf_close - float(bos_ref)) <= retest_band)
 
         # -------------------------
-        # Option C enforcement (BOS + Proximity + Retest)
+        # Mode decision
         # -------------------------
-        if direction not in ("BUY", "SELL"):
+        direction_out = "NONE"
+
+        # Common RR calc (only if we decide to trade)
+        entry_candidate = None
+        stop_candidate = None
+        tp_candidate = None
+        rr = 0.0
+
+        # Guard: must have BUY/SELL bias
+        if direction_bias not in ("BUY", "SELL"):
             blocked_reasons.append("direction_none")
 
-        # BOS required
-        if direction in ("BUY", "SELL") and not bos:
-            blocked_reasons.append("no_bos")
+        # Continuation Mode (No BOS)
+        if mode == "continuation" and cont_knobs["enabled"]:
+            # Rule #1: require MTF + LTF aligned with bias
+            if cont_knobs["require_mtf_ltf_align"]:
+                if not (mtf_trend == ("bearish" if direction_bias == "SELL" else "bullish") and
+                        ltf_trend == ("bearish" if direction_bias == "SELL" else "bullish")):
+                    blocked_reasons.append("no_mtf_ltf_align")
 
-        # Proximity required (must be near structure in the direction context)
-        # - enforce prox_score >= prox_min_score and prox_side aligns to direction
-        if direction in ("BUY", "SELL"):
-            if not (prox_side == direction and prox_score >= prox_min_score):
+            # HTF not opposite (allow ranging)
+            if cont_knobs["require_htf_not_opposite"]:
+                if direction_bias == "SELL" and htf_trend == "bullish":
+                    blocked_reasons.append("htf_opposite")
+                if direction_bias == "BUY" and htf_trend == "bearish":
+                    blocked_reasons.append("htf_opposite")
+
+            # Proximity required (aligned side)
+            if not (prox_side == direction_bias and prox_score >= cont_knobs["proximity_min_score"]):
                 blocked_reasons.append("no_proximity")
 
-        # Retest required (if configured)
-        if direction in ("BUY", "SELL") and knobs["require_retest"]:
-            if bos and not retest_ok:
-                blocked_reasons.append("no_retest")
+            # supertrend already checked above; keep as requirement
+            # rr requirement checked after candidate build
 
-        blocked = bool(len(blocked_reasons) > 0)
+            blocked = len(blocked_reasons) > 0
+            if not blocked:
+                direction_out = direction_bias
 
-        align = bool((direction == "BUY" and htf_trend == "bullish") or (direction == "SELL" and htf_trend == "bearish"))
-        score_0_10 = self.compute_score_0_10(
-            direction=direction,
-            htf_trend=htf_trend,
-            bos=bos,
-            prox_score_0_100=prox_score,
-            retest_ok=retest_ok,
-            overshoot_points=breakout_overshoot_points,
-            threshold_points=threshold_points,
-            blocked=blocked,
-        )
-        confidence_py = self.compute_confidence_0_100(score_0_10, bos=bos, retest_ok=retest_ok, align=align)
-
-        if blocked:
-            direction_out = "NONE"
-            entry_candidate = None
-            stop_candidate = None
-            tp_candidate = None
-            rr = 0.0
+        # Option C modes (default)
         else:
-            direction_out = direction
+            # BOS required
+            if direction_bias in ("BUY", "SELL") and not bos:
+                blocked_reasons.append("no_bos")
+
+            # Proximity required (aligned side)
+            if direction_bias in ("BUY", "SELL"):
+                if not (prox_side == direction_bias and prox_score >= breakout_knobs["proximity_min_score"]):
+                    blocked_reasons.append("no_proximity")
+
+            # Retest required
+            if direction_bias in ("BUY", "SELL") and breakout_knobs["require_retest"]:
+                if bos and not retest_ok:
+                    blocked_reasons.append("no_retest")
+
+            blocked = len(blocked_reasons) > 0
+            if not blocked:
+                direction_out = direction_bias
+
+        # Build candidates if signal allowed
+        if direction_out in ("BUY", "SELL"):
             tick = self.get_tick(symbol)
             entry_candidate = float(tick.ask if direction_out == "BUY" else tick.bid)
 
@@ -602,6 +469,15 @@ class TradingEngine:
                 reward = entry_candidate - tp_candidate
                 rr = float(reward / risk) if risk > 1e-9 else 0.0
 
+            # RR gate
+            if rr < min_rr:
+                direction_out = "NONE"
+                entry_candidate = stop_candidate = tp_candidate = None
+                rr = 0.0
+                blocked_reasons.append("rr_too_low")
+
+        blocked_by = ",".join(blocked_reasons) if blocked_reasons else None
+
         return {
             "symbol": symbol,
             "direction": direction_out,
@@ -609,22 +485,22 @@ class TradingEngine:
             "stop_candidate": stop_candidate,
             "tp_candidate": tp_candidate,
             "rr": float(rr),
-            "score": float(score_0_10),
-            "confidence_py": int(confidence_py),
+            "score": 0.0,
+            "confidence_py": 0,
             "bos": bool(bos),
             "supertrend_ok": bool(supertrend_ok),
             "context": {
-                "engine_version": "2.8.0",
+                "engine_version": "2.9.0",
+                "mode": mode,
                 "HTF_trend": htf_trend,
                 "MTF_trend": mtf_trend,
                 "LTF_trend": ltf_trend,
                 "bias_source": bias_source,
-                "direction_bias": direction,
+                "direction_bias": direction_bias,
 
                 "bos_ref_high": bos_hi,
                 "bos_ref_low": bos_lo,
                 "bos_ref": bos_ref,
-
                 "distance_buy": dist_buy,
                 "distance_sell": dist_sell,
 
@@ -633,22 +509,23 @@ class TradingEngine:
                 "atr_sl_mult": atr_sl_mult,
                 "min_rr": min_rr,
 
-                "breakout_confirm_buffer_atr": knobs["confirm_buffer_atr"],
+                "breakout_confirm_buffer_atr": breakout_knobs["confirm_buffer_atr"],
                 "breakout_confirm_buffer_points": confirm_buffer_points,
-                "breakout_proximity_min_score": prox_min_score,
-                "breakout_proximity_threshold_atr": threshold_atr_out,
-                "breakout_proximity_threshold_mode": threshold_mode,
-                "breakout_proximity_threshold_points": threshold_points,
-                "proximity_score": prox_score,
-                "proximity_side": prox_side,
-                "proximity_best_dist": prox_best_dist,
+                "breakout_proximity_min_score": breakout_knobs["proximity_min_score"],
+                "breakout_proximity_threshold_atr": breakout_knobs["proximity_threshold_atr"],
+
+                "continuation_enabled": cont_knobs["enabled"],
+                "continuation_require_mtf_ltf_align": cont_knobs["require_mtf_ltf_align"],
+                "continuation_require_htf_not_opposite": cont_knobs["require_htf_not_opposite"],
+                "continuation_proximity_threshold_atr": cont_knobs["proximity_threshold_atr"],
+                "continuation_proximity_min_score": cont_knobs["proximity_min_score"],
 
                 "breakout_state": breakout_state,
                 "breakout_side": breakout_side,
                 "breakout_overshoot_points": breakout_overshoot_points,
 
-                "retest_required": bool(knobs["require_retest"]),
-                "retest_band_atr": knobs["retest_band_atr"],
+                "retest_required": bool(breakout_knobs["require_retest"]),
+                "retest_band_atr": breakout_knobs["retest_band_atr"],
                 "retest_band": retest_band,
                 "retest_ok": retest_ok,
 
@@ -658,9 +535,13 @@ class TradingEngine:
                 "supertrend_value": st_value,
                 "supertrend_ok": bool(supertrend_ok),
 
-                "watch_state": watch_state,
-                "blocked_by": ",".join(blocked_reasons) if blocked_reasons else None,
+                "proximity_score": prox_score,
+                "proximity_side": prox_side,
+                "proximity_best_dist": prox_best_dist,
+                "proximity_threshold_points": threshold_points,
 
+                "watch_state": watch_state,
+                "blocked_by": blocked_by,
                 "timeframes": {"htf": htf, "mtf": mtf, "ltf": ltf},
                 "structure_sensitivity": {"htf": sens_htf, "mtf": sens_mtf, "ltf": sens_ltf},
             },
