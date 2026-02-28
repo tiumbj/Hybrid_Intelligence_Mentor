@@ -1,30 +1,26 @@
 """
 Mentor Executor - Execution Controller (Phase 9 Live Stabilization)
-Version: 2.7.0
+Version: 2.7.1
 
-Changelog:
-- 2.7.0 (2026-02-28)
-  - NEW: Enforce validator_v1_0 (confirm-only schema enforcement) at NEW TRADE boundary (fail-closed)
-      * Direction/lot lock (lot sourced from cfg)
-      * Entry shift bound (ATR-based)
-      * SL tighten-only vs engine baseline
-      * RR floor
-  - KEEP: Existing SL manager logic, stops/freeze/spread clamp, MT5 safety guards
+CHANGELOG
+- 2.7.1 (2026-02-28)
+  - FIX: Call TradingEngine.generate_signal_package() with signature-safe adapter
+         (handles engines that do not accept keyword 'symbol')
+  - KEEP: validator_v1_0 confirm-only enforcement at NEW TRADE boundary (fail-closed)
+  - KEEP: MT5 safety guards, stop-level check, spread clamp, confidence threshold
 
-Frozen decisions:
-- mode=sideway_scalp, min_rr=1.5, atr_sl_mult=1.6, require_confirmation=true
-- AI cannot change direction, cannot change lot sizing
+FROZEN DECISIONS
+- RR floor default = 1.5
+- Confirm-only: AI cannot change direction/lot; bounded entry shift; SL tighten-only; RR floor
 """
 
 from __future__ import annotations
 
-import json
+import inspect
 import logging
-import math
-import os
 import time
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import MetaTrader5 as mt5
 
@@ -96,6 +92,76 @@ class MentorExecutor:
             return []
 
     # -----------------------------
+    # Engine adapter (FIX)
+    # -----------------------------
+    def _engine_generate_pkg(self, symbol: str, mode: str):
+        """
+        Signature-safe adapter for TradingEngine.generate_signal_package.
+
+        Supports common variants:
+        - generate_signal_package(symbol, mode)
+        - generate_signal_package(mode)
+        - generate_signal_package()
+        - generate_signal_package(symbol=symbol, mode=mode) (if supported)
+
+        Fail-closed: on mismatch returns None and logs once per loop.
+        """
+        fn = getattr(self.engine, "generate_signal_package", None)
+        if fn is None:
+            logger.error("TradingEngine has no generate_signal_package()")
+            return None
+
+        # 1) Try keyword call (newer style)
+        try:
+            return fn(symbol=symbol, mode=mode)
+        except TypeError:
+            pass
+
+        # 2) Try inspect parameters and map safely
+        try:
+            sig = inspect.signature(fn)
+            params = list(sig.parameters.keys())
+
+            # Remove 'self' if present in signature display (usually not, but keep safe)
+            if params and params[0] == "self":
+                params = params[1:]
+
+            # Common naming
+            has_symbol = any(p in ("symbol", "sym", "ticker") for p in params)
+            has_mode = any(p in ("mode", "profile", "strategy_mode") for p in params)
+
+            # If accepts 2 positional args
+            if len(params) >= 2:
+                return fn(symbol, mode)
+
+            # If accepts 1 arg: prefer mode if it looks like mode-based, else symbol
+            if len(params) == 1:
+                if has_mode and not has_symbol:
+                    return fn(mode)
+                return fn(symbol)
+
+            # If accepts 0 args
+            if len(params) == 0:
+                return fn()
+
+        except Exception:
+            # ignore and fall through to brute-force attempts
+            pass
+
+        # 3) Brute-force attempts (last resort)
+        for args in ((symbol, mode), (mode,), (symbol,), ()):
+            try:
+                return fn(*args)
+            except TypeError:
+                continue
+            except Exception:
+                logger.error("Engine generate_signal_package() exception:\n" + traceback.format_exc())
+                return None
+
+        logger.error("Engine generate_signal_package() signature mismatch; cannot call")
+        return None
+
+    # -----------------------------
     # AI package builder
     # -----------------------------
     def _build_ai_package(self, cfg_eff: Dict[str, Any], pkg: Dict[str, Any]) -> Dict[str, Any]:
@@ -165,9 +231,8 @@ class MentorExecutor:
             "event_conf_cap_high": _si(ai_cfg.get("event_conf_cap_high", 72), 72),
         }
 
-        # baseline now includes lot/mode for validator locks
         lot = _sf(cfg_eff.get("lot", 0.01), 0.01)
-        mode = str(cfg_eff.get("mode", "") or "")
+        mode0 = str(cfg_eff.get("mode", "") or "")
 
         return {
             "symbol": symbol,
@@ -180,7 +245,7 @@ class MentorExecutor:
                 "atr": atr,
                 "spread_points": spread_pts,
                 "lot": lot,
-                "mode": mode,
+                "mode": mode0,
             },
             "execution_context": exec_ctx,
             "technical": technical,
@@ -194,12 +259,6 @@ class MentorExecutor:
     # Validator enforcement (NEW TRADE)
     # -----------------------------
     def _validate_ai_execution(self, ai_out: Dict[str, Any], baseline: Dict[str, Any], constraints: Dict[str, Any]) -> Tuple[bool, str]:
-        """
-        Fail-closed validation for AI execution block.
-        This enforces BOTH:
-        - existing numeric/range checks (sl_atr_min/max etc.)
-        - validator_v1_0 confirm-only rules (direction/lot lock, entry shift, SL tighten-only, RR floor)
-        """
         ex = (ai_out.get("execution") or {})
         direction = str(baseline.get("dir", "NONE")).upper()
 
@@ -214,24 +273,20 @@ class MentorExecutor:
         if not _sanity(direction, entry1, sl1, tp1):
             return False, "sanity_failed"
 
-        # Existing bounded shift (ATR)
         max_shift = _sf(constraints.get("entry_shift_max_atr", 0.20), 0.20) * atr
         if abs(entry1 - entry0) > (max_shift + 1e-9):
             return False, "entry_shift_exceed"
 
-        # Existing SL distance range (ATR) — keep execution safety
         sl_dist = abs(sl1 - entry1)
         sl_min = _sf(constraints.get("sl_atr_min", 1.20), 1.20) * atr
         sl_max = _sf(constraints.get("sl_atr_max", 1.80), 1.80) * atr
         if sl_dist < (sl_min - 1e-9) or sl_dist > (sl_max + 1e-9):
             return False, "sl_atr_range_fail"
 
-        # Existing RR floor check
         min_rr = _sf(constraints.get("min_rr", 1.50), 1.50)
         if rr1 < (min_rr - 1e-9):
             return False, "rr_below_min"
 
-        # NEW: validator_v1_0 confirm-only enforcement (fail-closed)
         engine_order = {
             "direction": direction,
             "entry": entry0,
@@ -261,7 +316,6 @@ class MentorExecutor:
         vr = validate_ai_response_v1_0(ai_payload, engine_order, policy=policy)
 
         if (not vr.ok) or (vr.decision != "CONFIRM"):
-            # keep reason deterministic
             code = vr.errors[0] if vr.errors else "validator_reject"
             return False, f"validator_reject:{code}"
 
@@ -328,7 +382,7 @@ class MentorExecutor:
         return True, "done"
 
     # -----------------------------
-    # Main loop (simplified)
+    # Main loop
     # -----------------------------
     def run(self) -> None:
         if not mt5.initialize():
@@ -342,27 +396,26 @@ class MentorExecutor:
                 symbol = str(cfg_eff.get("symbol", "GOLD"))
                 mode = str(cfg_eff.get("mode", "sideway_scalp"))
 
-                # Engine tick
-                pkg = self.engine.generate_signal_package(symbol=symbol, mode=mode)
-
-                # No candidate
-                if not pkg or not pkg.get("direction") or pkg.get("direction") == "NONE":
+                pkg = self._engine_generate_pkg(symbol=symbol, mode=mode)
+                if not pkg:
                     time.sleep(0.5)
                     continue
 
-                # avoid stacking
+                if not pkg.get("direction") or pkg.get("direction") == "NONE":
+                    time.sleep(0.5)
+                    continue
+
                 if len(self._positions(symbol)) > 0:
                     time.sleep(0.5)
                     continue
 
-                # AI (mock/rule-based)
                 ai_pkg = self._build_ai_package(cfg_eff, pkg)
                 ai_out = self.ai.evaluate(ai_pkg)
 
                 baseline = ai_pkg.get("baseline") or {}
                 constraints = ai_pkg.get("constraints") or {}
 
-                ok_ai, why_ai = self._validate_ai_execution(ai_out, baseline, constraints)
+                ok_ai, _ = self._validate_ai_execution(ai_out, baseline, constraints)
                 if not ok_ai:
                     time.sleep(0.5)
                     continue
@@ -375,7 +428,7 @@ class MentorExecutor:
                 conf = _si(ex.get("conf"), 0)
                 conf_th = _si(cfg_eff.get("confidence_threshold", 70), 70)
 
-                ok_lv, why_lv = self._validate_stops_levels(symbol, direction, entry1, sl1, tp1)
+                ok_lv, _ = self._validate_stops_levels(symbol, direction, entry1, sl1, tp1)
                 if not ok_lv:
                     time.sleep(0.5)
                     continue
@@ -413,7 +466,12 @@ class MentorExecutor:
                             "ts": time.time(),
                             "symbol": symbol,
                             "dir": direction,
-                            "baseline": {"entry": _sf(baseline.get("entry")), "sl": _sf(baseline.get("sl")), "tp": _sf(baseline.get("tp")), "rr": _sf(baseline.get("rr"))},
+                            "baseline": {
+                                "entry": _sf(baseline.get("entry")),
+                                "sl": _sf(baseline.get("sl")),
+                                "tp": _sf(baseline.get("tp")),
+                                "rr": _sf(baseline.get("rr")),
+                            },
                             "ai": {"entry": entry1, "sl": sl1, "tp": tp1, "conf": conf},
                             "ok": ok,
                             "msg": msg,
