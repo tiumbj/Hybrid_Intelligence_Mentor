@@ -619,8 +619,9 @@ class TradingEngine:
                 debug["debug_tp"] = float(tp_candidate)
                 debug["debug_rr"] = float(rr)
 
-                if rr < min_rr:
-                    debug["debug_rr_fail_reason"] = "rr < min_rr"
+                eps = 1e-6
+                if rr < (min_rr - eps):
+                    debug["debug_rr_fail_reason"] = "rr < (min_rr - eps)"
                     direction_out = "NONE"
                     entry_candidate = stop_candidate = tp_candidate = None
                     rr = 0.0
