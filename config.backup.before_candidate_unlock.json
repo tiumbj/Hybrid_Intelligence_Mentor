@@ -49,20 +49,20 @@
   "sideway_scalp": {
     "enabled": true,
     "adx_period": 14,
-    "adx_max": 35,
+    "adx_max": 22,
     "bb_period": 20,
     "bb_std": 2.0,
     "bb_width_atr_max": 6.0,
     "rsi_period": 14,
     "rsi_overbought": 70,
     "rsi_oversold": 30,
-    "touch_buffer_atr": 0.2,
+    "touch_buffer_atr": 0.1,
     "near_trigger_atr": 0.9,
     "proximity_window_atr": 2.5,
     "rsi_soft_band": 25,
     "allow_soft_trigger": true,
-    "require_confirmation": false,
-    "proximity_score_min": 0.4
+    "require_confirmation": true,
+    "proximity_score_min": 0.7
   },
   "profiles": {
     "sideway_scalp": {
@@ -105,13 +105,8 @@
   "telegram": {
     "enabled": false
   },
-"ai": {
-  "api_url": "http://127.0.0.1:5000/api/ai_confirm",
-  "timeout_sec": 15,
-  "min_rr": 1.5,
-  "entry_shift_max_atr": 0.20,
-  "entry_shift_max_pct": 0.0,
-  "enforce_mode_lock": false
-},
+  "ai": {
+    "enabled": false
+  },
   "proximity_score_min": 0.65
 }

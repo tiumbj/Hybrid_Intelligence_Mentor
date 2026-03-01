@@ -1,20 +1,21 @@
 """
 Hybrid Intelligence Mentor (HIM) Trading Engine
-Version: 2.10.5
+Version: 2.10.6
 
 Changelog:
-- 2.10.5 (2026-02-27):
-  - FEATURE: proximity_score_min gate (quality filter) for sideway_scalp
-      - Read from config: sideway_scalp.proximity_score_min (default 0.70)
-      - Applied mainly to SOFT-ZONE attempts (adaptive trigger). Hard-touch stays allowed.
-      - If in soft-zone but score < min => blocked_by includes "low_proximity_score"
+- 2.10.6 (2026-02-28):
+  - FIX: Prevent validator E_RR_FLOOR due to floating-point precision
+      - Use rr_eps to compute TP with target_rr = min_rr + rr_eps (strictly above RR floor)
+      - Keep fail-closed RR gate, but compare with epsilon tolerance: rr < (min_rr - eps)
+      - Add debug fields: debug_target_rr, debug_rr_eps
+  - KEEP: proximity_score_min gate (quality filter) for sideway_scalp
   - KEEP: adaptive trigger knobs (near_trigger_atr, allow_soft_trigger, rsi_soft_band)
   - KEEP: sideway_scalp NEUTRAL (bias_source="SIDEWAY_MODE", direction_bias="NEUTRAL")
   - KEEP: regime gate = ADX low + BB width normalized by ATR
-  - KEEP: debug bag from v2.10.4 to diagnose rr_too_low/tick anomalies (only when attempting trade)
+  - KEEP: debug bag to diagnose rr/tick anomalies (only when attempting trade)
 
 Notes:
-- This version is intended to reduce false signals on M5 by requiring "close enough" proximity.
+- This version is intended to preserve strict RR floor at validator while avoiding float artifacts.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ import MetaTrader5 as mt5
 from config_resolver import resolve_effective_config
 
 
-ENGINE_VERSION = "2.10.5"
+ENGINE_VERSION = "2.10.6"
 
 
 class TradingEngine:
@@ -289,7 +290,7 @@ class TradingEngine:
             m_dm[i] = m_dm[i - 1] - (m_dm[i - 1] / period) + minus_dm[i - 1]
 
         plus_di = 100.0 * (p_dm / np.where(atr == 0, np.nan, atr))
-        minus_di = 100.0 * (m_dm / np.where(atr == 0, np.nan, atr))
+        minus_di = 100.0 * (m_dm / np.where(atr == 0, np.nan, m_dm))
         dx = 100.0 * (np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, np.nan, (plus_di + minus_di)))
 
         start = period * 2
@@ -601,15 +602,21 @@ class TradingEngine:
                 debug["debug_min_rr_used"] = float(min_rr)
                 debug["debug_min_rr_check"] = float(min_rr)
 
+                # --- FIX: RR floor precision safety (validator strict RR floor) ---
+                rr_eps = 1e-6
+                target_rr = float(max(min_rr + rr_eps, 0.1))
+                debug["debug_rr_eps"] = float(rr_eps)
+                debug["debug_target_rr"] = float(target_rr)
+
                 if direction_out == "BUY":
                     stop_candidate = float(entry_candidate - sl_dist)
-                    tp_candidate = float(entry_candidate + sl_dist * float(max(min_rr, 0.1)))
+                    tp_candidate = float(entry_candidate + sl_dist * target_rr)
                     risk = entry_candidate - stop_candidate
                     reward = tp_candidate - entry_candidate
                     rr = float(reward / risk) if risk > 1e-9 else 0.0
                 else:
                     stop_candidate = float(entry_candidate + sl_dist)
-                    tp_candidate = float(entry_candidate - sl_dist * float(max(min_rr, 0.1)))
+                    tp_candidate = float(entry_candidate - sl_dist * target_rr)
                     risk = stop_candidate - entry_candidate
                     reward = entry_candidate - tp_candidate
                     rr = float(reward / risk) if risk > 1e-9 else 0.0
