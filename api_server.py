@@ -1,28 +1,21 @@
 """
 Hybrid Intelligence Mentor (HIM)
 File: api_server.py
-Version: v3.2.5 (External Dashboard Link Redirect)
+Version: v3.2.5 (Ultra-Light External Dashboard Redirect)
 Date: 2026-03-02 (Asia/Bangkok)
 
 CHANGELOG
 - v3.2.5:
-  - Remove heavy local dashboard serving.
-  - Add lightweight redirect endpoints:
-      * GET /          -> redirect to external dashboard URL (if configured)
-      * GET /dashboard -> redirect to external dashboard URL (if configured)
-  - If external URL missing -> show plain text with a copyable link placeholder.
-  - Keep API endpoints intact (status/config/health etc.) for production.
-
-RATIONALE (Production)
-- ลดภาระระบบ: ไม่ต้องมี dashboard.html, static files, UI mapping, polling UI logic
-- ปลอดภัย: API ยังคงเป็น source of truth, UI แยก host (website) ได้เลย
+  - Remove local dashboard serving (no HTML/JS/static).
+  - GET / and GET /dashboard redirect to config.dashboard.external_url.
+  - Keep minimal API endpoints: /api/health, /api/status, /api/config (GET/POST).
+  - Keep MT5 snapshot in /api/status (operator visibility).
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sys
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -32,25 +25,24 @@ from flask import Flask, request, jsonify, redirect, Response
 try:
     import MetaTrader5 as mt5
 except Exception as e:
-    mt5 = None  # API จะ fail-closed ใน health/status บางส่วน
+    mt5 = None
     _mt5_import_error = str(e)
 
-
 APP_VERSION = "v3.2.5"
-DEFAULT_CONFIG_PATH = os.environ.get("HIM_CONFIG", "config.json")
+CONFIG_PATH = os.environ.get("HIM_CONFIG", "config.json")
 
 app = Flask(__name__)
 
 
 # -------------------------
-# Utilities
+# Helpers
 # -------------------------
 
 def utc_iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def safe_load_json(path: str) -> Dict[str, Any]:
+def load_config(path: str) -> Dict[str, Any]:
     if not os.path.exists(path):
         return {}
     with open(path, "r", encoding="utf-8") as f:
@@ -58,7 +50,7 @@ def safe_load_json(path: str) -> Dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
-def safe_write_json(path: str, obj: Dict[str, Any]) -> None:
+def atomic_write_config(path: str, obj: Dict[str, Any]) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
@@ -74,15 +66,18 @@ def cfg_get(cfg: Dict[str, Any], keys: list[str], default: Any = None) -> Any:
     return cur
 
 
+def get_external_dashboard_url(cfg: Dict[str, Any]) -> Optional[str]:
+    url = cfg_get(cfg, ["dashboard", "external_url"], None)
+    if not url:
+        return None
+    url = str(url).strip()
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return None
+
+
 def mt5_snapshot(symbol: str) -> Dict[str, Any]:
-    """
-    Best-effort snapshot. Fail-closed: if MT5 not available, return minimal diagnostic.
-    """
-    snap: Dict[str, Any] = {
-        "ok": False,
-        "symbol": symbol,
-        "ts": utc_iso_now(),
-    }
+    snap: Dict[str, Any] = {"ok": False, "symbol": symbol, "ts": utc_iso_now()}
 
     if mt5 is None:
         snap["error"] = f"MetaTrader5_import_failed: {_mt5_import_error}"
@@ -101,9 +96,8 @@ def mt5_snapshot(symbol: str) -> Dict[str, Any]:
         snap.update({
             "ok": True,
             "terminal": {
-                "trade_allowed": bool(getattr(term, "trade_allowed", False)) if term else False,
                 "connected": bool(getattr(term, "connected", False)) if term else False,
-                "path": getattr(term, "path", None) if term else None,
+                "trade_allowed": bool(getattr(term, "trade_allowed", False)) if term else False,
             },
             "account": {
                 "trade_allowed": bool(getattr(acc, "trade_allowed", False)) if acc else False,
@@ -134,57 +128,40 @@ def mt5_snapshot(symbol: str) -> Dict[str, Any]:
             pass
 
 
-def external_dashboard_url(cfg: Dict[str, Any]) -> Optional[str]:
-    """
-    Read external dashboard URL from config:
-      dashboard.external_url
-    """
-    url = cfg_get(cfg, ["dashboard", "external_url"], None)
-    if not url:
-        return None
-    url = str(url).strip()
-    if not (url.startswith("http://") or url.startswith("https://")):
-        return None
-    return url
-
-
 # -------------------------
-# Routes: External Dashboard Redirect (Lightest)
+# Ultra-light Dashboard Redirect
 # -------------------------
 
 @app.get("/")
 def root() -> Response:
-    cfg = safe_load_json(DEFAULT_CONFIG_PATH)
-    url = external_dashboard_url(cfg)
+    cfg = load_config(CONFIG_PATH)
+    url = get_external_dashboard_url(cfg)
     if url:
         return redirect(url, code=302)
-
-    # เบาสุด: plain text
     return Response(
-        "External Dashboard URL not configured.\n"
-        "Set config.json: dashboard.external_url = \"https://your-dashboard-website\"\n",
+        "External dashboard URL not configured.\n"
+        "Set config.json: dashboard.external_url = \"https://...\"\n",
         mimetype="text/plain",
         status=200
     )
 
 
 @app.get("/dashboard")
-def dashboard_redirect() -> Response:
-    cfg = safe_load_json(DEFAULT_CONFIG_PATH)
-    url = external_dashboard_url(cfg)
+def dashboard() -> Response:
+    cfg = load_config(CONFIG_PATH)
+    url = get_external_dashboard_url(cfg)
     if url:
         return redirect(url, code=302)
-
     return Response(
-        "External Dashboard URL not configured.\n"
-        "Set config.json: dashboard.external_url = \"https://your-dashboard-website\"\n",
+        "External dashboard URL not configured.\n"
+        "Set config.json: dashboard.external_url = \"https://...\"\n",
         mimetype="text/plain",
         status=200
     )
 
 
 # -------------------------
-# API: Health / Status / Config
+# APIs
 # -------------------------
 
 @app.get("/api/health")
@@ -194,54 +171,37 @@ def api_health() -> Response:
         "service": "HIM api_server",
         "version": APP_VERSION,
         "ts": utc_iso_now(),
-        "config_path": DEFAULT_CONFIG_PATH,
+        "config_path": CONFIG_PATH,
     })
 
 
 @app.get("/api/status")
 def api_status() -> Response:
-    cfg = safe_load_json(DEFAULT_CONFIG_PATH)
+    cfg = load_config(CONFIG_PATH)
     symbol = str(cfg.get("symbol", "GOLD"))
-
     enable_execution = bool(cfg.get("enable_execution", False))
-    execution_mode = "LIVE" if enable_execution else "DRY_RUN"
 
-    status: Dict[str, Any] = {
+    return jsonify({
         "ok": True,
         "version": APP_VERSION,
         "ts": utc_iso_now(),
         "symbol": symbol,
         "enable_execution": enable_execution,
-        "execution_mode": execution_mode,
-        "telegram": {
-            "enabled": bool(cfg_get(cfg, ["telegram", "enabled"], False))
-        },
-        # IMPORTANT: keep mt5 block for operator visibility
+        "execution_mode": "LIVE" if enable_execution else "DRY_RUN",
+        "telegram": {"enabled": bool(cfg_get(cfg, ["telegram", "enabled"], False))},
+        "dashboard": {"external_url": get_external_dashboard_url(cfg)},
         "mt5": mt5_snapshot(symbol),
-        "dashboard": {
-            "external_url": external_dashboard_url(cfg)
-        }
-    }
-    return jsonify(status)
+    })
 
 
 @app.get("/api/config")
 def api_get_config() -> Response:
-    cfg = safe_load_json(DEFAULT_CONFIG_PATH)
-    return jsonify({
-        "ok": True,
-        "ts": utc_iso_now(),
-        "config": cfg
-    })
+    cfg = load_config(CONFIG_PATH)
+    return jsonify({"ok": True, "ts": utc_iso_now(), "config": cfg})
 
 
 @app.post("/api/config")
 def api_set_config() -> Response:
-    """
-    Update config.json with provided JSON object. Fail-closed:
-    - body must be JSON object
-    - only writes if valid
-    """
     try:
         body = request.get_json(force=True, silent=False)
     except Exception:
@@ -250,8 +210,7 @@ def api_set_config() -> Response:
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "config_must_be_object"}), 400
 
-    # minimal write
-    safe_write_json(DEFAULT_CONFIG_PATH, body)
+    atomic_write_config(CONFIG_PATH, body)
     return jsonify({"ok": True, "ts": utc_iso_now()})
 
 
@@ -266,8 +225,8 @@ def main() -> int:
         "version": APP_VERSION,
         "host": host,
         "port": port,
-        "config_path": DEFAULT_CONFIG_PATH,
-        "note": "Dashboard serving removed. Use external dashboard URL in config.json.",
+        "config_path": CONFIG_PATH,
+        "note": "Local dashboard removed; redirect to config.dashboard.external_url",
     }, ensure_ascii=False))
 
     app.run(host=host, port=port, debug=debug)

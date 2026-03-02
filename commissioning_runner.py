@@ -1,24 +1,25 @@
 """
 Hybrid Intelligence Mentor (HIM)
 File: commissioning_runner.py
-Version: v2.12.4 (Event-Based Commissioning)
+Version: v2.12.5 (Event-Based Commissioning + Gate Observability)
 Date: 2026-03-02 (Asia/Bangkok)
 
 CHANGELOG
-- v2.12.4:
-  - Implement event-based gating:
-      * NEW_BAR: trigger only when a new bar appears (per timeframe)
-      * SIGNAL_CHANGE: trigger when signal signature changes
-  - Fail-closed guards:
-      * MT5 initialize must succeed
-      * Tick freshness must pass (uses mt5.time_current vs tick.time)
-      * If signal eval unavailable, fallback to NEW_BAR only (still reduces duplicates)
-  - JSONL event log: logs/commissioning_events.jsonl
-  - Does NOT rely on PowerShell loop for production; runs as a controlled runner
+- v2.12.5:
+  - Add Gate Observability breakdown logging to EVENT details:
+      * htf/mtf/ltf trend direction (best-effort)
+      * ADX value (best-effort)
+      * BB width / ATR (best-effort)
+      * Supertrend direction/state (best-effort)
+      * blocked_by / gates / reasons (best-effort)
+  - Still event-based:
+      * NEW_BAR (per TF)
+      * SIGNAL_CHANGE (stable signature)
+  - No engine schema assumptions: missing fields -> null; never crash runner.
 
-RATIONALE (Production)
-- Prior issue: logs/commissioning.jsonl duplicated by evaluation loop (e.g., total=401 repeated)
-- Fix: define "event" and log/execute only on events.
+RATIONALE
+- หลัง P0 event-based ผ่านแล้ว ต้องทำ P1: observability เพื่อวิเคราะห์ blocked_by จริง
+- ทำแบบ non-breaking ก่อน เพื่อกัน “แก้ engine แล้วพัง”
 """
 
 from __future__ import annotations
@@ -32,24 +33,24 @@ import traceback
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import MetaTrader5 as mt5
 except Exception as e:
     print(f"[FATAL] MetaTrader5 import failed: {e}")
-    sys.exit(1)
+    raise SystemExit(1)
 
 
-# ----------------------------
-# Utility
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
 
 def utc_iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def ensure_dir(path: str) -> None:
+def ensure_dir_for_file(path: str) -> None:
     d = os.path.dirname(path)
     if d and not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
@@ -63,16 +64,41 @@ def sha1_hex(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 
-def safe_float(x: Any, default: float = 0.0) -> float:
+def safe_float(x: Any, default: Optional[float] = None) -> Optional[float]:
     try:
+        if x is None:
+            return default
         return float(x)
     except Exception:
         return default
 
 
-# ----------------------------
-# Config Load (fail-closed)
-# ----------------------------
+def load_json(path: str, default: Any) -> Any:
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def atomic_write_json(path: str, obj: Any) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def append_jsonl(path: str, obj: Dict[str, Any]) -> None:
+    ensure_dir_for_file(path)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json_dumps_compact(obj) + "\n")
+
+
+# -----------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------
 
 def load_config(path: str) -> Dict[str, Any]:
     if not os.path.exists(path):
@@ -80,7 +106,7 @@ def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
     if not isinstance(cfg, dict):
-        raise ValueError("config.json must be an object/dict")
+        raise ValueError("config.json must be a JSON object")
     return cfg
 
 
@@ -93,9 +119,9 @@ def cfg_get(cfg: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
     return cur
 
 
-# ----------------------------
-# MT5 Guards (tick freshness)
-# ----------------------------
+# -----------------------------------------------------------------------------
+# MT5: Tick freshness + bar time
+# -----------------------------------------------------------------------------
 
 @dataclass
 class TickSnapshot:
@@ -112,18 +138,17 @@ def get_tick_snapshot(symbol: str) -> Optional[TickSnapshot]:
     if tick is None:
         return None
 
-    # Production-safe time base: mt5.time_current()
     server_time = int(mt5.time_current())
     tick_time = int(getattr(tick, "time", 0))
 
     age = server_time - tick_time
     if age < 0:
-        age = 0  # clamp (fail-closed would be "treat as fresh?" — but clamp is safer to avoid negative noise)
+        age = 0
 
     return TickSnapshot(
-        bid=safe_float(getattr(tick, "bid", 0.0)),
-        ask=safe_float(getattr(tick, "ask", 0.0)),
-        last=safe_float(getattr(tick, "last", 0.0)),
+        bid=float(getattr(tick, "bid", 0.0) or 0.0),
+        ask=float(getattr(tick, "ask", 0.0) or 0.0),
+        last=float(getattr(tick, "last", 0.0) or 0.0),
         tick_time=tick_time,
         server_time=server_time,
         tick_age_sec=float(age),
@@ -133,10 +158,6 @@ def get_tick_snapshot(symbol: str) -> Optional[TickSnapshot]:
 def tick_is_fresh(tick: TickSnapshot, max_age_sec: float) -> bool:
     return tick.tick_age_sec <= max_age_sec
 
-
-# ----------------------------
-# Timeframe mapping
-# ----------------------------
 
 TF_MAP = {
     "M1": mt5.TIMEFRAME_M1,
@@ -163,94 +184,214 @@ TF_MAP = {
 }
 
 
-def get_latest_bar_time(symbol: str, tf_code: int) -> Optional[int]:
-    """
-    Return latest bar open time (unix seconds). Fail-closed returns None on errors.
-    """
+def get_latest_bar_time(symbol: str, tf_name: str) -> Optional[int]:
+    tf_code = TF_MAP.get(tf_name)
+    if tf_code is None:
+        return None
     try:
         rates = mt5.copy_rates_from_pos(symbol, tf_code, 0, 1)
         if rates is None or len(rates) == 0:
             return None
-        # numpy structured array: rates[0]['time']
         return int(rates[0]["time"])
     except Exception:
         return None
 
 
-# ----------------------------
-# Signal evaluation (best-effort)
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Event State (persistent)
+# -----------------------------------------------------------------------------
 
-def try_eval_signal_signature(config_path: str) -> Tuple[Optional[str], Dict[str, Any]]:
-    """
-    Best-effort: import TradingEngine and attempt to produce a *stable signature*.
+@dataclass
+class EventState:
+    last_bar_time: Dict[str, int]          # tf_name -> bar_time
+    last_signature: Optional[str]          # stable signal signature
 
-    Returns:
-      (signature_str_or_None, debug_payload)
-    If cannot evaluate, returns (None, debug payload).
+
+def load_event_state(path: str) -> EventState:
+    obj = load_json(path, {})
+    if not isinstance(obj, dict):
+        obj = {}
+    lbt = obj.get("last_bar_time", {})
+    if not isinstance(lbt, dict):
+        lbt = {}
+    lbt2: Dict[str, int] = {}
+    for k, v in lbt.items():
+        try:
+            lbt2[str(k).upper()] = int(v)
+        except Exception:
+            continue
+    sig = obj.get("last_signature", None)
+    if sig is not None:
+        sig = str(sig)
+    return EventState(last_bar_time=lbt2, last_signature=sig)
+
+
+def save_event_state(path: str, st: EventState) -> None:
+    atomic_write_json(path, {
+        "last_bar_time": st.last_bar_time,
+        "last_signature": st.last_signature,
+        "ts": utc_iso_now(),
+        "version": "v2.12.5",
+    })
+
+
+# -----------------------------------------------------------------------------
+# Observability extraction (best-effort, schema-agnostic)
+# -----------------------------------------------------------------------------
+
+def _dig(d: Any, path: List[str]) -> Any:
+    cur = d
+    for k in path:
+        if not isinstance(cur, dict) or k not in cur:
+            return None
+        cur = cur[k]
+    return cur
+
+
+def _first_present(d: Dict[str, Any], candidates: List[List[str]]) -> Any:
+    for p in candidates:
+        v = _dig(d, p)
+        if v is not None:
+            return v
+    return None
+
+
+def build_observability(d: Dict[str, Any]) -> Dict[str, Any]:
     """
+    Return a stable observability dict; missing fields -> None
+    """
+    # trend directions (try multiple schemas)
+    htf_dir = _first_present(d, [
+        ["structure", "htf", "dir"],
+        ["structure", "htf", "direction"],
+        ["htf", "dir"],
+        ["htf_dir"],
+        ["htf_direction"],
+    ])
+    mtf_dir = _first_present(d, [
+        ["structure", "mtf", "dir"],
+        ["structure", "mtf", "direction"],
+        ["mtf", "dir"],
+        ["mtf_dir"],
+        ["mtf_direction"],
+    ])
+    ltf_dir = _first_present(d, [
+        ["structure", "ltf", "dir"],
+        ["structure", "ltf", "direction"],
+        ["ltf", "dir"],
+        ["ltf_dir"],
+        ["ltf_direction"],
+    ])
+
+    # ADX
+    adx_val = _first_present(d, [
+        ["adx"],
+        ["indicators", "adx"],
+        ["breakout", "adx"],
+        ["sideway_scalp", "adx"],
+        ["metrics", "adx"],
+    ])
+    adx_val = safe_float(adx_val, None)
+
+    # BB width / ATR (vol expansion)
+    bb_width_atr = _first_present(d, [
+        ["bb_width_atr"],
+        ["indicators", "bb_width_atr"],
+        ["breakout", "bb_width_atr"],
+        ["metrics", "bb_width_atr"],
+        ["vol", "bb_width_atr"],
+    ])
+    bb_width_atr = safe_float(bb_width_atr, None)
+
+    # Supertrend direction/state
+    st_dir = _first_present(d, [
+        ["supertrend", "dir"],
+        ["supertrend", "direction"],
+        ["indicators", "supertrend_dir"],
+        ["supertrend_dir"],
+    ])
+
+    # blocked_by / gates / reasons
+    blocked_by = d.get("blocked_by", None)
+    gates = d.get("gates", None)
+    reasons = d.get("reasons", None)
+
+    # If nested
+    if blocked_by is None:
+        blocked_by = _first_present(d, [["decision", "blocked_by"], ["audit", "blocked_by"]])
+    if gates is None:
+        gates = _first_present(d, [["decision", "gates"], ["audit", "gates"]])
+    if reasons is None:
+        reasons = _first_present(d, [["decision", "reasons"], ["audit", "reasons"]])
+
+    # Keep blocked_by stable (avoid huge nested)
+    if isinstance(blocked_by, (list, dict)):
+        blocked_by = json_dumps_compact(blocked_by)
+    if isinstance(gates, (list, dict)):
+        gates = json_dumps_compact(gates)
+    if isinstance(reasons, (list, dict)):
+        reasons = json_dumps_compact(reasons)
+
+    # Minimal decision fields
+    decision = _first_present(d, [["decision"], ["action"], ["signal"], ["side"]])
+
+    return {
+        "htf_dir": htf_dir,
+        "mtf_dir": mtf_dir,
+        "ltf_dir": ltf_dir,
+        "adx": adx_val,
+        "bb_width_atr": bb_width_atr,
+        "supertrend_dir": st_dir,
+        "decision": decision,
+        "blocked_by": blocked_by,
+        "gates": gates,
+        "reasons": reasons,
+    }
+
+
+# -----------------------------------------------------------------------------
+# Signal payload + signature (best-effort)
+# -----------------------------------------------------------------------------
+
+def try_eval_signal_payload(config_path: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     dbg: Dict[str, Any] = {"ok": False, "method": None, "error": None}
     try:
         from engine import TradingEngine  # type: ignore
 
         e = TradingEngine(config_path)
 
-        # Try common method names in order (avoid breaking existing engine)
         candidates = ["generate_signal", "build_signal", "run_once", "evaluate", "get_signal"]
-        signal_obj: Any = None
         used = None
+        out: Any = None
 
         for name in candidates:
             if hasattr(e, name) and callable(getattr(e, name)):
                 used = name
-                signal_obj = getattr(e, name)()
+                out = getattr(e, name)()
                 break
 
         if used is None:
             dbg["error"] = "TradingEngine has no known eval method"
             return None, dbg
 
-        dbg["method"] = used
         dbg["ok"] = True
+        dbg["method"] = used
 
-        # Normalize to dict for hashing
-        if isinstance(signal_obj, dict):
-            sig_dict = signal_obj
+        if isinstance(out, dict):
+            d = out
+        elif hasattr(out, "to_dict") and callable(getattr(out, "to_dict")):
+            d = out.to_dict()
+        elif hasattr(out, "__dict__"):
+            d = dict(out.__dict__)
         else:
-            # Attempt common attribute patterns
-            if hasattr(signal_obj, "to_dict") and callable(getattr(signal_obj, "to_dict")):
-                sig_dict = signal_obj.to_dict()
-            elif hasattr(signal_obj, "__dict__"):
-                sig_dict = dict(signal_obj.__dict__)
-            else:
-                sig_dict = {"repr": repr(signal_obj)}
+            d = {"repr": repr(out)}
 
-        # Keep only key fields (reduce noise, keep "decision intent")
-        # We do not know exact schema, so we pick by existence.
-        keep_keys = [
-            "symbol", "timeframe", "mode",
-            "direction", "side", "signal",
-            "decision", "action",
-            "blocked_by", "gates", "reasons",
-            "entry", "sl", "tp", "rr",
-            "confidence",
-        ]
-        compact: Dict[str, Any] = {}
-        for k in keep_keys:
-            if k in sig_dict:
-                compact[k] = sig_dict[k]
+        if not isinstance(d, dict):
+            d = {"repr": repr(d)}
 
-        # If blocked_by is nested, keep stable string form
-        if "blocked_by" in compact and isinstance(compact["blocked_by"], (list, dict)):
-            compact["blocked_by"] = json_dumps_compact(compact["blocked_by"])
-
-        # Fallback: if compact empty, hash full repr but may be noisy
-        base = compact if compact else {"repr": repr(sig_dict)}
-
-        sig_raw = json_dumps_compact(base)
-        signature = sha1_hex(sig_raw)
-        dbg["signature_base"] = base
-        return signature, dbg
+        # reduce extremely large payload
+        dbg["top_keys"] = list(d.keys())[:80]
+        return d, dbg
 
     except Exception as ex:
         dbg["error"] = f"{type(ex).__name__}: {ex}"
@@ -258,108 +399,118 @@ def try_eval_signal_signature(config_path: str) -> Tuple[Optional[str], Dict[str
         return None, dbg
 
 
-# ----------------------------
-# Event Gating State
-# ----------------------------
+def build_stable_signature(signal_dict: Dict[str, Any]) -> str:
+    """
+    Hash only stable decision-related fields to avoid noise.
+    """
+    keep = [
+        "symbol", "mode",
+        "direction", "side", "signal", "decision", "action",
+        "blocked_by", "gates", "reasons",
+        "entry", "sl", "tp", "rr",
+        "confidence",
+    ]
+    compact: Dict[str, Any] = {}
+    for k in keep:
+        if k in signal_dict:
+            compact[k] = signal_dict[k]
 
-@dataclass
-class EventState:
-    last_bar_time: Dict[str, int]        # key=tf_name
-    last_signature: Optional[str]
+    # normalize nested
+    if "blocked_by" in compact and isinstance(compact["blocked_by"], (list, dict)):
+        compact["blocked_by"] = json_dumps_compact(compact["blocked_by"])
+    if "gates" in compact and isinstance(compact["gates"], (list, dict)):
+        compact["gates"] = json_dumps_compact(compact["gates"])
+    if "reasons" in compact and isinstance(compact["reasons"], (list, dict)):
+        compact["reasons"] = json_dumps_compact(compact["reasons"])
+
+    base = compact if compact else {"repr": repr(signal_dict)}
+    return sha1_hex(json_dumps_compact(base))
 
 
-def default_event_state() -> EventState:
-    return EventState(last_bar_time={}, last_signature=None)
-
-
-def should_fire_event(
+def detect_events(
     symbol: str,
     tfs: List[str],
-    state: EventState,
+    st: EventState,
     config_path: str,
 ) -> Tuple[bool, List[str], Dict[str, Any]]:
     """
-    Decide whether to trigger an event.
-
     Returns:
-      (fire, reasons, details)
+      fire, reasons, details
+    Note:
+      - First observation initializes state but does NOT fire event (prevents initial burst).
     """
     reasons: List[str] = []
     details: Dict[str, Any] = {"bars": {}, "signal": {}}
 
-    # 1) NEW_BAR (per TF)
+    # NEW_BAR
     new_bar = False
-    for tf_name in tfs:
-        tf_code = TF_MAP.get(tf_name)
-        if tf_code is None:
-            continue
-        bt = get_latest_bar_time(symbol, tf_code)
-        details["bars"][tf_name] = bt
+    for tf in tfs:
+        bt = get_latest_bar_time(symbol, tf)
+        details["bars"][tf] = bt
         if bt is None:
             continue
-        prev = state.last_bar_time.get(tf_name)
+        prev = st.last_bar_time.get(tf)
         if prev is None:
-            # first init does not count as event (prevents immediate burst)
-            state.last_bar_time[tf_name] = bt
+            st.last_bar_time[tf] = bt
         elif bt != prev:
+            st.last_bar_time[tf] = bt
             new_bar = True
-            state.last_bar_time[tf_name] = bt
 
     if new_bar:
         reasons.append("NEW_BAR")
 
-    # 2) SIGNAL_CHANGE (best-effort)
-    sig, sig_dbg = try_eval_signal_signature(config_path)
-    details["signal"] = {"signature": sig, "dbg": sig_dbg}
+    # SIGNAL_CHANGE + OBS (best-effort)
+    sig_dict, sig_dbg = try_eval_signal_payload(config_path)
+    obs = None
+    signature = None
 
-    if sig is not None:
-        if state.last_signature is None:
-            # first signature init does not count as event
-            state.last_signature = sig
-        elif sig != state.last_signature:
+    if isinstance(sig_dict, dict):
+        obs = build_observability(sig_dict)
+        signature = build_stable_signature(sig_dict)
+
+    details["signal"] = {
+        "signature": signature,
+        "dbg": sig_dbg,
+        "obs": obs
+    }
+
+    if signature is not None:
+        if st.last_signature is None:
+            st.last_signature = signature
+        elif signature != st.last_signature:
+            st.last_signature = signature
             reasons.append("SIGNAL_CHANGE")
-            state.last_signature = sig
 
-    fire = len(reasons) > 0
-    return fire, reasons, details
+    return (len(reasons) > 0), reasons, details
 
 
-# ----------------------------
-# Event Log (JSONL)
-# ----------------------------
-
-def append_jsonl(path: str, obj: Dict[str, Any]) -> None:
-    ensure_dir(path)
-    line = json_dumps_compact(obj)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
-
-
-# ----------------------------
-# Executor Invocation (one-shot)
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Executor invocation (one-shot)
+# -----------------------------------------------------------------------------
 
 def run_mentor_executor(py_exe: str, config_path: str) -> Tuple[int, str]:
-    """
-    Calls mentor_executor.py as a subprocess (one-shot).
-    Fail-closed: returns non-zero code if failed.
-    """
-    cmd = [py_exe, "mentor_executor.py", "--config", config_path]
+    cmd = [py_exe, "mentor_executor.py"]
+    env = os.environ.copy()
+    env["HIM_CONFIG"] = config_path
+
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
         out = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
-        return int(p.returncode), out.strip()
+        out = out.strip()
+        if len(out) > 4000:
+            out = out[-4000:]
+        return int(p.returncode), out
     except Exception as e:
         return 99, f"executor_call_failed: {type(e).__name__}: {e}"
 
 
-# ----------------------------
-# Main Runner
-# ----------------------------
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 
 def main() -> int:
     config_path = os.environ.get("HIM_CONFIG", "config.json")
-    py_exe = sys.executable  # use current venv python
+    py_exe = sys.executable
 
     try:
         cfg = load_config(config_path)
@@ -368,124 +519,142 @@ def main() -> int:
         return 2
 
     symbol = str(cfg.get("symbol", "GOLD"))
-    tick_max_age_sec = safe_float(cfg_get(cfg, ["execution", "tick_max_age_sec"], 15), 15)
-    poll_sec = safe_float(cfg_get(cfg, ["commissioning", "poll_sec"], 1.0), 1.0)
+    commissioning_enabled = bool(cfg_get(cfg, ["commissioning", "enabled"], True))
 
-    # Which timeframes define NEW_BAR event
-    # If not set, default to ["M5"] (practical commissioning TF)
-    tfs = cfg_get(cfg, ["commissioning", "event_timeframes"], ["M5"])
-    if not isinstance(tfs, list) or not tfs:
-        tfs = ["M5"]
-    tfs = [str(x).upper() for x in tfs if str(x).upper() in TF_MAP]
-
+    poll_sec = safe_float(cfg_get(cfg, ["commissioning", "poll_sec"], 1.0), 1.0) or 1.0
     events_log_path = str(cfg_get(cfg, ["commissioning", "events_log_path"], "logs/commissioning_events.jsonl"))
+    tick_max_age = safe_float(
+        cfg_get(cfg, ["execution", "tick_max_age_sec"], cfg.get("tick_max_age_sec", 15)),
+        15
+    ) or 15.0
 
-    # MT5 init (fail-closed)
+    # TF for NEW_BAR:
+    tfs_cfg = cfg_get(cfg, ["commissioning", "event_timeframes"], None)
+    if isinstance(tfs_cfg, list) and tfs_cfg:
+        tfs = [str(x).upper() for x in tfs_cfg]
+    else:
+        ltf = cfg_get(cfg, ["timeframes", "ltf"], "M5")
+        tfs = [str(ltf).upper()]
+
+    tfs = [tf for tf in tfs if tf in TF_MAP]
+    if not tfs:
+        tfs = ["M5"]
+
+    state_path = str(cfg_get(cfg, ["commissioning", "state_path"], ".commission_event_state.json"))
+    st = load_event_state(state_path)
+
+    print(json_dumps_compact({
+        "ts": utc_iso_now(),
+        "msg": "commissioning_runner_start",
+        "version": "v2.12.5",
+        "config_path": config_path,
+        "symbol": symbol,
+        "enabled": commissioning_enabled,
+        "poll_sec": poll_sec,
+        "tick_max_age_sec": tick_max_age,
+        "event_timeframes": tfs,
+        "events_log_path": events_log_path,
+        "state_path": state_path
+    }))
+
+    if not commissioning_enabled:
+        print("[INFO] commissioning.enabled=false -> exit")
+        return 0
+
     if not mt5.initialize():
         print("[FATAL] mt5.initialize() failed")
         return 3
 
-    # Ensure symbol selected/visible
-    sym_info = mt5.symbol_info(symbol)
-    if sym_info is None:
-        print(f"[FATAL] symbol_info is None for symbol={symbol}")
+    sym = mt5.symbol_info(symbol)
+    if sym is None:
+        print(f"[FATAL] symbol_info None: {symbol}")
         return 4
-    if not sym_info.visible:
+    if not sym.visible:
         mt5.symbol_select(symbol, True)
 
-    state = default_event_state()
+    try:
+        while True:
+            try:
+                tick = get_tick_snapshot(symbol)
+                if tick is None:
+                    append_jsonl(events_log_path, {
+                        "ts": utc_iso_now(),
+                        "type": "HEARTBEAT",
+                        "ok": False,
+                        "reason": "NO_TICK",
+                        "symbol": symbol
+                    })
+                    time.sleep(poll_sec)
+                    continue
 
-    print(json_dumps_compact({
-        "ts": utc_iso_now(),
-        "msg": "commissioning_runner_started",
-        "version": "v2.12.4",
-        "symbol": symbol,
-        "tick_max_age_sec": tick_max_age_sec,
-        "poll_sec": poll_sec,
-        "event_timeframes": tfs,
-        "events_log_path": events_log_path,
-    }))
+                if not tick_is_fresh(tick, tick_max_age):
+                    append_jsonl(events_log_path, {
+                        "ts": utc_iso_now(),
+                        "type": "HEARTBEAT",
+                        "ok": False,
+                        "reason": "STALE_TICK",
+                        "symbol": symbol,
+                        "tick_age_sec": tick.tick_age_sec,
+                        "tick_time": tick.tick_time,
+                        "server_time": tick.server_time
+                    })
+                    time.sleep(poll_sec)
+                    continue
 
-    while True:
+                fire, reasons, details = detect_events(symbol, tfs, st, config_path)
+
+                save_event_state(state_path, st)
+
+                if not fire:
+                    time.sleep(poll_sec)
+                    continue
+
+                append_jsonl(events_log_path, {
+                    "ts": utc_iso_now(),
+                    "type": "EVENT",
+                    "symbol": symbol,
+                    "reasons": reasons,
+                    "tick": {
+                        "bid": tick.bid,
+                        "ask": tick.ask,
+                        "last": tick.last,
+                        "tick_time": tick.tick_time,
+                        "server_time": tick.server_time,
+                        "tick_age_sec": tick.tick_age_sec
+                    },
+                    "details": details
+                })
+
+                rc, out = run_mentor_executor(py_exe, config_path)
+                append_jsonl(events_log_path, {
+                    "ts": utc_iso_now(),
+                    "type": "EXECUTOR_RESULT",
+                    "symbol": symbol,
+                    "returncode": rc,
+                    "output_tail": out
+                })
+
+                time.sleep(poll_sec)
+
+            except KeyboardInterrupt:
+                print(json_dumps_compact({"ts": utc_iso_now(), "msg": "stopped_by_user"}))
+                break
+            except Exception as e:
+                append_jsonl(events_log_path, {
+                    "ts": utc_iso_now(),
+                    "type": "ERROR",
+                    "symbol": symbol,
+                    "error": f"{type(e).__name__}: {e}",
+                    "trace": traceback.format_exc(limit=3)
+                })
+                time.sleep(max(poll_sec, 1.0))
+
+    finally:
         try:
-            tick = get_tick_snapshot(symbol)
-            if tick is None:
-                # fail-closed: no tick => no event, no executor
-                append_jsonl(events_log_path, {
-                    "ts": utc_iso_now(),
-                    "type": "HEARTBEAT",
-                    "symbol": symbol,
-                    "ok": False,
-                    "reason": "NO_TICK",
-                })
-                time.sleep(poll_sec)
-                continue
+            mt5.shutdown()
+        except Exception:
+            pass
 
-            if not tick_is_fresh(tick, tick_max_age_sec):
-                append_jsonl(events_log_path, {
-                    "ts": utc_iso_now(),
-                    "type": "HEARTBEAT",
-                    "symbol": symbol,
-                    "ok": False,
-                    "reason": "STALE_TICK",
-                    "tick_age_sec": tick.tick_age_sec,
-                    "tick_time": tick.tick_time,
-                    "server_time": tick.server_time,
-                })
-                time.sleep(poll_sec)
-                continue
-
-            fire, reasons, details = should_fire_event(symbol, tfs, state, config_path)
-            if not fire:
-                # quiet heartbeat (optional)
-                time.sleep(poll_sec)
-                continue
-
-            # Log the event (event-based)
-            event_payload = {
-                "ts": utc_iso_now(),
-                "type": "EVENT",
-                "symbol": symbol,
-                "reasons": reasons,
-                "tick": {
-                    "bid": tick.bid,
-                    "ask": tick.ask,
-                    "last": tick.last,
-                    "tick_time": tick.tick_time,
-                    "server_time": tick.server_time,
-                    "tick_age_sec": tick.tick_age_sec,
-                },
-                "details": details,
-            }
-            append_jsonl(events_log_path, event_payload)
-
-            # Trigger executor only on event
-            rc, out = run_mentor_executor(py_exe, config_path)
-            append_jsonl(events_log_path, {
-                "ts": utc_iso_now(),
-                "type": "EXECUTOR_RESULT",
-                "symbol": symbol,
-                "returncode": rc,
-                "output_tail": out[-4000:],  # prevent huge logs
-            })
-
-            # pacing
-            time.sleep(poll_sec)
-
-        except KeyboardInterrupt:
-            print(json_dumps_compact({"ts": utc_iso_now(), "msg": "stopped_by_user"}))
-            break
-        except Exception as e:
-            append_jsonl(events_log_path, {
-                "ts": utc_iso_now(),
-                "type": "ERROR",
-                "symbol": symbol,
-                "error": f"{type(e).__name__}: {e}",
-                "trace": traceback.format_exc(limit=3),
-            })
-            time.sleep(max(poll_sec, 1.0))
-
-    mt5.shutdown()
     return 0
 
 

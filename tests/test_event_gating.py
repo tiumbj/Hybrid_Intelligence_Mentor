@@ -2,7 +2,7 @@
 HIM
 File: tests/test_event_gating.py
 Version: v2.12.4
-Purpose: Basic unit tests for event gating state transitions (no MT5 dependency).
+Purpose: Regression tests for event gating (no MT5 dependency).
 """
 
 import unittest
@@ -16,13 +16,13 @@ class EventState:
     last_signature: Optional[str]
 
 
-def default_event_state() -> EventState:
+def default_state() -> EventState:
     return EventState(last_bar_time={}, last_signature=None)
 
 
-def simulate_should_fire_event(
+def simulate_detect_events(
     tfs: List[str],
-    state: EventState,
+    st: EventState,
     bar_times: Dict[str, int],
     signature: Optional[str],
 ) -> Tuple[bool, List[str]]:
@@ -34,54 +34,52 @@ def simulate_should_fire_event(
         bt = bar_times.get(tf)
         if bt is None:
             continue
-        prev = state.last_bar_time.get(tf)
+        prev = st.last_bar_time.get(tf)
         if prev is None:
-            state.last_bar_time[tf] = bt
+            st.last_bar_time[tf] = bt  # init only
         elif bt != prev:
+            st.last_bar_time[tf] = bt
             new_bar = True
-            state.last_bar_time[tf] = bt
     if new_bar:
         reasons.append("NEW_BAR")
 
     # SIGNAL_CHANGE
     if signature is not None:
-        if state.last_signature is None:
-            state.last_signature = signature
-        elif signature != state.last_signature:
+        if st.last_signature is None:
+            st.last_signature = signature  # init only
+        elif signature != st.last_signature:
+            st.last_signature = signature
             reasons.append("SIGNAL_CHANGE")
-            state.last_signature = signature
 
     return (len(reasons) > 0), reasons
 
 
 class TestEventGating(unittest.TestCase):
-    def test_initialization_no_event(self):
-        st = default_event_state()
-        fire, reasons = simulate_should_fire_event(
-            ["M5"], st, {"M5": 1000}, "aaa"
-        )
+    def test_initial_no_event(self):
+        st = default_state()
+        fire, reasons = simulate_detect_events(["M5"], st, {"M5": 1000}, "a")
         self.assertFalse(fire)
         self.assertEqual(reasons, [])
 
-    def test_new_bar_triggers(self):
-        st = default_event_state()
-        simulate_should_fire_event(["M5"], st, {"M5": 1000}, "aaa")  # init
-        fire, reasons = simulate_should_fire_event(["M5"], st, {"M5": 2000}, "aaa")
+    def test_new_bar_event(self):
+        st = default_state()
+        simulate_detect_events(["M5"], st, {"M5": 1000}, "a")  # init
+        fire, reasons = simulate_detect_events(["M5"], st, {"M5": 2000}, "a")
         self.assertTrue(fire)
         self.assertIn("NEW_BAR", reasons)
         self.assertNotIn("SIGNAL_CHANGE", reasons)
 
-    def test_signal_change_triggers(self):
-        st = default_event_state()
-        simulate_should_fire_event(["M5"], st, {"M5": 1000}, "aaa")  # init
-        fire, reasons = simulate_should_fire_event(["M5"], st, {"M5": 1000}, "bbb")
+    def test_signal_change_event(self):
+        st = default_state()
+        simulate_detect_events(["M5"], st, {"M5": 1000}, "a")  # init
+        fire, reasons = simulate_detect_events(["M5"], st, {"M5": 1000}, "b")
         self.assertTrue(fire)
         self.assertIn("SIGNAL_CHANGE", reasons)
 
-    def test_both_triggers(self):
-        st = default_event_state()
-        simulate_should_fire_event(["M5"], st, {"M5": 1000}, "aaa")  # init
-        fire, reasons = simulate_should_fire_event(["M5"], st, {"M5": 2000}, "bbb")
+    def test_both_events(self):
+        st = default_state()
+        simulate_detect_events(["M5"], st, {"M5": 1000}, "a")  # init
+        fire, reasons = simulate_detect_events(["M5"], st, {"M5": 2000}, "b")
         self.assertTrue(fire)
         self.assertIn("NEW_BAR", reasons)
         self.assertIn("SIGNAL_CHANGE", reasons)
