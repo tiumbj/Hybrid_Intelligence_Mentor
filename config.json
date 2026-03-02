@@ -8,7 +8,7 @@
     ]
   },
   "symbol": "GOLD",
-  "mode": "sideway_scalp",
+  "mode": "breakout",
   "timeframes": {
     "htf": "H1",
     "mtf": "M15",
@@ -27,7 +27,7 @@
     "atr_period": 14,
     "atr_sl_mult": 1.6
   },
-  "min_rr": 2,
+  "min_rr": 1.6,
   "supertrend": {
     "period": 10,
     "mult": 3.0
@@ -37,10 +37,13 @@
     "proximity_threshold_atr": 2.5,
     "proximity_min_score": 10.0,
     "retest_required": true,
-    "retest_band_atr": 0.3
+    "retest_band_atr": 0.3,
+    "adx_proximity_override": 30.0,
+    "dynamic_retest_bypass_adx": 35.0
   },
-  {
-  "adx_proximity_override": 30.0
+  "commissioning": {
+    "enabled": true,
+    "log_path": "logs/commissioning.jsonl"
   },
   "continuation": {
     "enabled": false,
@@ -106,7 +109,7 @@
     }
   },
   "telegram": {
-    "enabled": false
+    "enabled": true
   },
   "ai": {
     "api_url": "http://127.0.0.1:5000/api/ai_confirm",
@@ -117,8 +120,8 @@
     "enforce_mode_lock": false
   },
   "proximity_score_min": 0.65,
-  "confidence_threshold": 75,
-  "min_score": 7,
+  "confidence_threshold": 55,
+  "min_score": 5,
   "lot": 0.01,
-  "enable_execution": false
+  "enable_execution": true
 }

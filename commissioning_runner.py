@@ -1,58 +1,91 @@
-# =============================================================================
-# Hybrid Intelligence Mentor (HIM) - Commissioning Runner
-# File: commissioning_runner.py
-# Path: C:\Hybrid_Intelligence_Mentor\commissioning_runner.py
-# Version: v1.0.1
-# Date: 2026-03-01 (Asia/Bangkok)
-#
-# Changelog:
-# - v1.0.1:
-#   1) Fix: Replay RR floor precision ด้วย epsilon (กัน rr=1.4999999999999 หลุด floor=1.5)
-#   2) Fix: ส่ง direction/lot/mode แบบ fail-closed defaults เมื่อ AI ตอบไม่ครบ (ให้ validator ตัดสินชัด)
-#   3) Improve: แสดงค่า RR computed จาก replay order ก่อนส่ง AI/Validator เพื่อ debug ง่ายขึ้น
-#
-# Notes (Design Intent):
-# - ปลอดภัยก่อน: replay mode จะไม่ส่งคำสั่งเทรดจริงเข้า MT5
-# - deterministic: สร้าง baseline order จาก historical bars แบบกำหนดสูตรตายตัว
-# - ใช้ schema v1.0 และเรียก validator ก่อนเสมอ (fail-closed)
-# =============================================================================
+"""
+Hybrid Intelligence Mentor (HIM)
+File: commissioning_runner.py
+Version: v2.12.4 (Event-Based Commissioning)
+Date: 2026-03-02 (Asia/Bangkok)
+
+CHANGELOG
+- v2.12.4:
+  - Implement event-based gating:
+      * NEW_BAR: trigger only when a new bar appears (per timeframe)
+      * SIGNAL_CHANGE: trigger when signal signature changes
+  - Fail-closed guards:
+      * MT5 initialize must succeed
+      * Tick freshness must pass (uses mt5.time_current vs tick.time)
+      * If signal eval unavailable, fallback to NEW_BAR only (still reduces duplicates)
+  - JSONL event log: logs/commissioning_events.jsonl
+  - Does NOT rely on PowerShell loop for production; runs as a controlled runner
+
+RATIONALE (Production)
+- Prior issue: logs/commissioning.jsonl duplicated by evaluation loop (e.g., total=401 repeated)
+- Fix: define "event" and log/execute only on events.
+"""
 
 from __future__ import annotations
 
 import json
-import math
-import subprocess
+import os
 import sys
 import time
+import hashlib
+import traceback
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
-import MetaTrader5 as mt5
-import numpy as np
-import pandas as pd
-import requests
-
-
-# -----------------------------
-# Small utilities
-# -----------------------------
-
-def _now_utc_ts() -> float:
-    return time.time()
+try:
+    import MetaTrader5 as mt5
+except Exception as e:
+    print(f"[FATAL] MetaTrader5 import failed: {e}")
+    sys.exit(1)
 
 
-def _ts_to_iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+# ----------------------------
+# Utility
+# ----------------------------
+
+def utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _read_json(path: Path) -> Dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+def ensure_dir(path: str) -> None:
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
 
 
-def _safe_get(d: Dict[str, Any], keys: Tuple[str, ...], default=None):
-    cur: Any = d
+def json_dumps_compact(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def sha1_hex(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+
+def safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+# ----------------------------
+# Config Load (fail-closed)
+# ----------------------------
+
+def load_config(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"config not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("config.json must be an object/dict")
+    return cfg
+
+
+def cfg_get(cfg: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
+    cur: Any = cfg
     for k in keys:
         if not isinstance(cur, dict) or k not in cur:
             return default
@@ -60,477 +93,400 @@ def _safe_get(d: Dict[str, Any], keys: Tuple[str, ...], default=None):
     return cur
 
 
-def _print_kv(title: str, kv: Dict[str, Any]) -> None:
-    print(f"\n== {title} ==")
-    for k, v in kv.items():
-        print(f"- {k}: {v}")
-
-
-# -----------------------------
-# Indicators (deterministic)
-# -----------------------------
-
-def atr_wilder(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-    """
-    ATR แบบ Wilder smoothing
-    Returns array len = n (ค่าต้นแรกๆ จะเป็น nan จนกว่าจะพอ period)
-    """
-    n = len(close)
-    tr = np.full(n, np.nan, dtype=float)
-    tr[0] = high[0] - low[0]
-    prev_close = close[:-1]
-    tr[1:] = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - prev_close), np.abs(low[1:] - prev_close)))
-
-    atr = np.full(n, np.nan, dtype=float)
-    if n < period + 1:
-        return atr
-
-    first = np.nanmean(tr[1:period + 1])
-    atr[period] = first
-
-    for i in range(period + 1, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-
-    return atr
-
-
-def adx_wilder(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-    """
-    ADX แบบ Wilder
-    Returns array len = n (ค่าแรกๆ เป็น nan)
-    """
-    n = len(close)
-    if n < period * 2 + 2:
-        return np.full(n, np.nan, dtype=float)
-
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-
-    tr = np.full(n, np.nan, dtype=float)
-    tr[0] = high[0] - low[0]
-    prev_close = close[:-1]
-    tr[1:] = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - prev_close), np.abs(low[1:] - prev_close)))
-
-    tr14 = np.full(n, np.nan, dtype=float)
-    p14 = np.full(n, np.nan, dtype=float)
-    m14 = np.full(n, np.nan, dtype=float)
-
-    tr14[period] = np.sum(tr[1:period + 1])
-    p14[period] = np.sum(plus_dm[:period])
-    m14[period] = np.sum(minus_dm[:period])
-
-    for i in range(period + 1, n):
-        tr14[i] = tr14[i - 1] - (tr14[i - 1] / period) + tr[i]
-        p14[i] = p14[i - 1] - (p14[i - 1] / period) + plus_dm[i - 1]
-        m14[i] = m14[i - 1] - (m14[i - 1] / period) + minus_dm[i - 1]
-
-    plus_di = 100.0 * (p14 / tr14)
-    minus_di = 100.0 * (m14 / tr14)
-
-    dx = 100.0 * (np.abs(plus_di - minus_di) / (plus_di + minus_di))
-    dx = np.where(np.isfinite(dx), dx, np.nan)
-
-    adx = np.full(n, np.nan, dtype=float)
-    first_adx_idx = 2 * period
-    adx[first_adx_idx] = np.nanmean(dx[period:first_adx_idx])
-
-    for i in range(first_adx_idx + 1, n):
-        adx[i] = ((adx[i - 1] * (period - 1)) + dx[i]) / period
-
-    return adx
-
-
-def bb_width(close: np.ndarray, period: int = 20, stdev: float = 2.0) -> np.ndarray:
-    """
-    BB width = (upper - lower)
-    """
-    n = len(close)
-    out = np.full(n, np.nan, dtype=float)
-    if n < period:
-        return out
-    s = pd.Series(close)
-    ma = s.rolling(period).mean()
-    sd = s.rolling(period).std(ddof=0)
-    upper = ma + stdev * sd
-    lower = ma - stdev * sd
-    out[:] = (upper - lower).to_numpy(dtype=float)
-    return out
-
-
-# -----------------------------
-# Replay baseline order (deterministic)
-# -----------------------------
+# ----------------------------
+# MT5 Guards (tick freshness)
+# ----------------------------
 
 @dataclass
-class EngineOrder:
-    symbol: str
-    mode: str
-    direction: str  # BUY/SELL
-    lot: float
-    entry: float
-    sl: float
-    tp: float
-    rr: float
-    atr: float
-    adx: float
-    bb_width: float
-    bb_width_atr: float
+class TickSnapshot:
+    bid: float
+    ask: float
+    last: float
+    tick_time: int
+    server_time: int
+    tick_age_sec: float
 
 
-def build_replay_engine_order(cfg: Dict[str, Any], rates_df: pd.DataFrame) -> EngineOrder:
-    """
-    สร้าง baseline order แบบ deterministic จาก historical bars
-    เป้าหมาย: commissioning AI+Validator ขณะตลาดปิด (ไม่ใช่แทน logic engine จริง)
-    """
-    symbol = str(cfg.get("symbol", "GOLD"))
-    mode = str(cfg.get("mode", "sideway_scalp"))
+def get_tick_snapshot(symbol: str) -> Optional[TickSnapshot]:
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        return None
 
-    lot = float(_safe_get(cfg, ("execution", "volume"), 0.01))
-    min_rr = float(cfg.get("min_rr", 1.5))
+    # Production-safe time base: mt5.time_current()
+    server_time = int(mt5.time_current())
+    tick_time = int(getattr(tick, "time", 0))
 
-    h = rates_df["high"].to_numpy(dtype=float)
-    l = rates_df["low"].to_numpy(dtype=float)
-    c = rates_df["close"].to_numpy(dtype=float)
+    age = server_time - tick_time
+    if age < 0:
+        age = 0  # clamp (fail-closed would be "treat as fresh?" — but clamp is safer to avoid negative noise)
 
-    atr = atr_wilder(h, l, c, period=14)
-    adx = adx_wilder(h, l, c, period=14)
-    bw = bb_width(c, period=20, stdev=2.0)
-
-    last_close = float(c[-1])
-    last_atr = float(atr[-1]) if np.isfinite(atr[-1]) else float(np.nanmean(atr[-50:]))
-    last_adx = float(adx[-1]) if np.isfinite(adx[-1]) else float(np.nanmean(adx[-50:]))
-    last_bw = float(bw[-1]) if np.isfinite(bw[-1]) else float(np.nanmean(bw[-50:]))
-
-    if not (math.isfinite(last_atr) and last_atr > 0):
-        raise ValueError("Replay commissioning: ATR invalid (history not enough or data bad)")
-
-    # direction rule (deterministic):
-    # - ถ้า close > SMA20 => BUY else SELL
-    sma20 = float(pd.Series(c).rolling(20).mean().iloc[-1])
-    direction = "BUY" if last_close > sma20 else "SELL"
-
-    # sizing rule (deterministic):
-    # - SL distance = 1.0 * ATR
-    # - TP distance = (target_rr + epsilon) * SL distance
-    #   เพื่อกัน floating precision ทำ rr หลุด floor เช่น 1.499999999999956
-    sl_dist = 1.0 * last_atr
-    target_rr = max(min_rr, 1.5)
-    epsilon = 1e-6  # deterministic micro-buffer
-    tp_dist = (target_rr + epsilon) * sl_dist
-
-    entry = last_close
-    if direction == "BUY":
-        sl = entry - sl_dist
-        tp = entry + tp_dist
-        rr = (tp - entry) / max(entry - sl, 1e-12)
-    else:
-        sl = entry + sl_dist
-        tp = entry - tp_dist
-        rr = (entry - tp) / max(sl - entry, 1e-12)
-
-    bw_atr = last_bw / last_atr if last_atr > 0 else float("nan")
-
-    return EngineOrder(
-        symbol=symbol,
-        mode=mode,
-        direction=direction,
-        lot=lot,
-        entry=float(entry),
-        sl=float(sl),
-        tp=float(tp),
-        rr=float(rr),
-        atr=float(last_atr),
-        adx=float(last_adx),
-        bb_width=float(last_bw),
-        bb_width_atr=float(bw_atr),
+    return TickSnapshot(
+        bid=safe_float(getattr(tick, "bid", 0.0)),
+        ask=safe_float(getattr(tick, "ask", 0.0)),
+        last=safe_float(getattr(tick, "last", 0.0)),
+        tick_time=tick_time,
+        server_time=server_time,
+        tick_age_sec=float(age),
     )
 
 
-# -----------------------------
-# AI confirm schema v1.0 + Validator v1.0
-# -----------------------------
+def tick_is_fresh(tick: TickSnapshot, max_age_sec: float) -> bool:
+    return tick.tick_age_sec <= max_age_sec
 
-def call_ai_confirm_v1(cfg: Dict[str, Any], order: EngineOrder) -> Dict[str, Any]:
+
+# ----------------------------
+# Timeframe mapping
+# ----------------------------
+
+TF_MAP = {
+    "M1": mt5.TIMEFRAME_M1,
+    "M2": mt5.TIMEFRAME_M2,
+    "M3": mt5.TIMEFRAME_M3,
+    "M4": mt5.TIMEFRAME_M4,
+    "M5": mt5.TIMEFRAME_M5,
+    "M6": mt5.TIMEFRAME_M6,
+    "M10": mt5.TIMEFRAME_M10,
+    "M12": mt5.TIMEFRAME_M12,
+    "M15": mt5.TIMEFRAME_M15,
+    "M20": mt5.TIMEFRAME_M20,
+    "M30": mt5.TIMEFRAME_M30,
+    "H1": mt5.TIMEFRAME_H1,
+    "H2": mt5.TIMEFRAME_H2,
+    "H3": mt5.TIMEFRAME_H3,
+    "H4": mt5.TIMEFRAME_H4,
+    "H6": mt5.TIMEFRAME_H6,
+    "H8": mt5.TIMEFRAME_H8,
+    "H12": mt5.TIMEFRAME_H12,
+    "D1": mt5.TIMEFRAME_D1,
+    "W1": mt5.TIMEFRAME_W1,
+    "MN1": mt5.TIMEFRAME_MN1,
+}
+
+
+def get_latest_bar_time(symbol: str, tf_code: int) -> Optional[int]:
     """
-    เรียก /api/ai_confirm โดยส่ง baseline fields แบบ top-level
+    Return latest bar open time (unix seconds). Fail-closed returns None on errors.
     """
-    api_url = str(_safe_get(cfg, ("ai", "api_url"), "http://127.0.0.1:5000/api/ai_confirm"))
-    timeout_sec = float(_safe_get(cfg, ("ai", "timeout_sec"), 10))
-
-    payload = {
-        "symbol": order.symbol,
-        "mode": order.mode,
-        "direction": order.direction,
-        "lot": order.lot,
-        "entry": order.entry,
-        "sl": order.sl,
-        "tp": order.tp,
-        "atr": order.atr,
-        "adx": order.adx,
-        "bb_width": order.bb_width,
-        "bb_width_atr": order.bb_width_atr,
-        "min_rr": float(cfg.get("min_rr", 1.5)),
-    }
-
-    r = requests.post(api_url, json=payload, timeout=timeout_sec)
-    r.raise_for_status()
-    data = r.json()
-    if not isinstance(data, dict):
-        raise ValueError("AI confirm: response is not a JSON object")
-    return data
-
-
-def _normalize_ai_payload_fail_closed(ai_payload: Dict[str, Any], order: EngineOrder) -> Dict[str, Any]:
-    """
-    AI อาจส่ง REJECT และ omit fields บางตัว (direction/lot/mode)
-    เรา normalize แบบ fail-closed:
-    - ถ้า missing -> ใส่ค่าจาก engine baseline (เพื่อให้ validator ประเมินได้ชัด)
-    - ไม่ได้ทำให้ “ผ่าน” อัตโนมัติ; validator ยังเป็นคนตัดสิน
-    """
-    out = dict(ai_payload)
-
-    # required-by-schema fields ที่มักหลุดใน REJECT
-    if out.get("schema_version") is None:
-        out["schema_version"] = "1.0"
-    if out.get("decision") is None:
-        out["decision"] = "REJECT"
-    if out.get("confidence") is None:
-        out["confidence"] = 0.0
-    if out.get("note") is None:
-        out["note"] = "AI fail-closed (missing fields)"
-
-    # lock fields from engine baseline
-    if out.get("direction") is None:
-        out["direction"] = order.direction
-    if out.get("lot") is None:
-        out["lot"] = order.lot
-    if out.get("mode") is None:
-        out["mode"] = order.mode
-
-    # price fields (ถ้า AI ไม่ส่ง ให้ยึด baseline)
-    if out.get("entry") is None:
-        out["entry"] = order.entry
-    if out.get("sl") is None:
-        out["sl"] = order.sl
-    if out.get("tp") is None:
-        out["tp"] = order.tp
-
-    return out
-
-
-def validate_with_validator_v1_0(ai_payload: Dict[str, Any], order: EngineOrder, cfg: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
-    """
-    เรียก validator_v1_0.py
-    """
-    engine_order = {
-        "symbol": order.symbol,
-        "mode": order.mode,
-        "direction": order.direction,
-        "lot": order.lot,
-        "entry": order.entry,
-        "sl": order.sl,
-        "tp": order.tp,
-        "rr": order.rr,
-        "min_rr": float(cfg.get("min_rr", 1.5)),
-        "context": {
-            "atr": order.atr,
-            "adx": order.adx,
-            "bb_width": order.bb_width,
-            "bb_width_atr": order.bb_width_atr,
-        },
-    }
-
     try:
-        from validator_v1_0 import validate_ai_response_v1_0  # type: ignore
-    except Exception as e:
-        return False, f"validator_import_error: {e}", {"engine_order": engine_order, "ai_payload": ai_payload}
-
-    try:
-        res = validate_ai_response_v1_0(ai_payload, engine_order)  # ValidationResult-like
-        ok = bool(getattr(res, "ok", False)) if not isinstance(res, dict) else bool(res.get("ok", False))
-        decision = getattr(res, "decision", None) if not isinstance(res, dict) else res.get("decision", None)
-        reasons = getattr(res, "reasons", ()) if not isinstance(res, dict) else res.get("reasons", ())
-        errors = getattr(res, "errors", ()) if not isinstance(res, dict) else res.get("errors", ())
-
-        msg = f"ok={ok} decision={decision} errors={errors} reasons={reasons}"
-        return ok, msg, {"engine_order": engine_order, "ai_payload": ai_payload, "validator_result": res}
-    except Exception as e:
-        return False, f"validator_runtime_error: {e}", {"engine_order": engine_order, "ai_payload": ai_payload}
-
-
-# -----------------------------
-# MT5 helpers
-# -----------------------------
-
-def mt5_init_or_die() -> None:
-    if mt5.initialize():
-        return
-    raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
-
-
-def get_tick_age_sec(symbol: str) -> Tuple[Optional[float], Dict[str, Any]]:
-    info = mt5.symbol_info(symbol)
-    tick = mt5.symbol_info_tick(symbol)
-
-    meta = {
-        "symbol": symbol,
-        "mt5_connected": True,
-        "symbol_visible": bool(getattr(info, "visible", False)) if info else None,
-        "trade_allowed": bool(getattr(info, "trade_allowed", False)) if info else None,
-        "trade_mode": getattr(info, "trade_mode", None) if info else None,
-    }
-
-    if tick is None:
-        meta["tick"] = None
-        return None, meta
-
-    tick_ts = float(getattr(tick, "time", 0.0))
-    age = _now_utc_ts() - tick_ts if tick_ts > 0 else None
-
-    meta["tick_time_utc"] = _ts_to_iso(tick_ts) if tick_ts > 0 else None
-    meta["tick_age_sec"] = age
-    meta["bid"] = getattr(tick, "bid", None)
-    meta["ask"] = getattr(tick, "ask", None)
-    meta["volume"] = getattr(tick, "volume", None)
-
-    return age, meta
-
-
-def fetch_rates(symbol: str, timeframe: int, bars: int = 500) -> pd.DataFrame:
-    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, bars)
-    if rates is None or len(rates) == 0:
-        raise RuntimeError("MT5 copy_rates_from_pos returned empty")
-    df = pd.DataFrame(rates)
-    df["time_utc"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    return df
-
-
-# -----------------------------
-# Runner modes
-# -----------------------------
-
-def run_live_executor() -> int:
-    exe = [sys.executable, "mentor_executor.py"]
-    print("\n[RUN] Live path: calling mentor_executor.py")
-    print("CMD:", " ".join(exe))
-    p = subprocess.run(exe, capture_output=False)
-    return int(p.returncode)
-
-
-def run_replay_commissioning(cfg: Dict[str, Any]) -> int:
-    symbol = str(cfg.get("symbol", "GOLD"))
-
-    tf = mt5.TIMEFRAME_H1
-    bars = int(_safe_get(cfg, ("commissioning", "replay_bars"), 500))
-
-    print("\n[REPLAY] Fetching historical rates...")
-    df = fetch_rates(symbol, tf, bars=bars)
-
-    _print_kv("Replay data", {
-        "symbol": symbol,
-        "timeframe": "H1",
-        "bars": len(df),
-        "from_utc": str(df["time_utc"].iloc[0]),
-        "to_utc": str(df["time_utc"].iloc[-1]),
-    })
-
-    print("\n[REPLAY] Building deterministic baseline engine_order (commissioning-only)...")
-    order = build_replay_engine_order(cfg, df)
-
-    _print_kv("Baseline order (deterministic)", {
-        "direction": order.direction,
-        "lot": order.lot,
-        "entry": order.entry,
-        "sl": order.sl,
-        "tp": order.tp,
-        "rr": order.rr,
-        "min_rr": float(cfg.get("min_rr", 1.5)),
-        "atr": order.atr,
-        "adx": order.adx,
-        "bb_width": order.bb_width,
-        "bb_width_atr": order.bb_width_atr,
-    })
-
-    print("\n[REPLAY] Calling AI confirm endpoint (/api/ai_confirm) ...")
-    raw_ai = call_ai_confirm_v1(cfg, order)
-    ai_payload = _normalize_ai_payload_fail_closed(raw_ai, order)
-
-    _print_kv("AI payload (normalized)", {
-        "schema_version": ai_payload.get("schema_version"),
-        "decision": ai_payload.get("decision"),
-        "confidence": ai_payload.get("confidence"),
-        "direction": ai_payload.get("direction"),
-        "lot": ai_payload.get("lot"),
-        "mode": ai_payload.get("mode"),
-        "entry": ai_payload.get("entry"),
-        "sl": ai_payload.get("sl"),
-        "tp": ai_payload.get("tp"),
-        "note": ai_payload.get("note"),
-    })
-
-    print("\n[REPLAY] Validating with validator_v1_0 (fail-closed) ...")
-    ok, msg, debug = validate_with_validator_v1_0(ai_payload, order, cfg)
-
-    print("[VALIDATOR]", msg)
-    if not ok:
-        print("\n[FAIL-CLOSED] Commissioning replay failed. Debug snapshot:")
-        print(json.dumps(debug, default=str, indent=2))
-        return 2
-
-    print("\n[PASS] Replay commissioning passed (AI schema v1.0 + Validator v1.0).")
-    print("Note: replay mode ไม่ส่งออเดอร์เข้า MT5 (safety by design).")
-    return 0
-
-
-def load_config() -> Dict[str, Any]:
-    root = Path(__file__).resolve().parent
-    cfg_path = root / "config.json"
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"config.json not found at: {cfg_path}")
-
-    # Try resolver (ถ้ามี)
-    try:
-        import config_resolver  # type: ignore
-        if hasattr(config_resolver, "load_effective_config"):
-            return config_resolver.load_effective_config(str(cfg_path))  # type: ignore
-        if hasattr(config_resolver, "ConfigResolver"):
-            r = config_resolver.ConfigResolver(str(cfg_path))  # type: ignore
-            if hasattr(r, "load"):
-                return r.load()  # type: ignore
+        rates = mt5.copy_rates_from_pos(symbol, tf_code, 0, 1)
+        if rates is None or len(rates) == 0:
+            return None
+        # numpy structured array: rates[0]['time']
+        return int(rates[0]["time"])
     except Exception:
-        pass
+        return None
 
-    return _read_json(cfg_path)
 
+# ----------------------------
+# Signal evaluation (best-effort)
+# ----------------------------
+
+def try_eval_signal_signature(config_path: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    """
+    Best-effort: import TradingEngine and attempt to produce a *stable signature*.
+
+    Returns:
+      (signature_str_or_None, debug_payload)
+    If cannot evaluate, returns (None, debug payload).
+    """
+    dbg: Dict[str, Any] = {"ok": False, "method": None, "error": None}
+    try:
+        from engine import TradingEngine  # type: ignore
+
+        e = TradingEngine(config_path)
+
+        # Try common method names in order (avoid breaking existing engine)
+        candidates = ["generate_signal", "build_signal", "run_once", "evaluate", "get_signal"]
+        signal_obj: Any = None
+        used = None
+
+        for name in candidates:
+            if hasattr(e, name) and callable(getattr(e, name)):
+                used = name
+                signal_obj = getattr(e, name)()
+                break
+
+        if used is None:
+            dbg["error"] = "TradingEngine has no known eval method"
+            return None, dbg
+
+        dbg["method"] = used
+        dbg["ok"] = True
+
+        # Normalize to dict for hashing
+        if isinstance(signal_obj, dict):
+            sig_dict = signal_obj
+        else:
+            # Attempt common attribute patterns
+            if hasattr(signal_obj, "to_dict") and callable(getattr(signal_obj, "to_dict")):
+                sig_dict = signal_obj.to_dict()
+            elif hasattr(signal_obj, "__dict__"):
+                sig_dict = dict(signal_obj.__dict__)
+            else:
+                sig_dict = {"repr": repr(signal_obj)}
+
+        # Keep only key fields (reduce noise, keep "decision intent")
+        # We do not know exact schema, so we pick by existence.
+        keep_keys = [
+            "symbol", "timeframe", "mode",
+            "direction", "side", "signal",
+            "decision", "action",
+            "blocked_by", "gates", "reasons",
+            "entry", "sl", "tp", "rr",
+            "confidence",
+        ]
+        compact: Dict[str, Any] = {}
+        for k in keep_keys:
+            if k in sig_dict:
+                compact[k] = sig_dict[k]
+
+        # If blocked_by is nested, keep stable string form
+        if "blocked_by" in compact and isinstance(compact["blocked_by"], (list, dict)):
+            compact["blocked_by"] = json_dumps_compact(compact["blocked_by"])
+
+        # Fallback: if compact empty, hash full repr but may be noisy
+        base = compact if compact else {"repr": repr(sig_dict)}
+
+        sig_raw = json_dumps_compact(base)
+        signature = sha1_hex(sig_raw)
+        dbg["signature_base"] = base
+        return signature, dbg
+
+    except Exception as ex:
+        dbg["error"] = f"{type(ex).__name__}: {ex}"
+        dbg["trace"] = traceback.format_exc(limit=2)
+        return None, dbg
+
+
+# ----------------------------
+# Event Gating State
+# ----------------------------
+
+@dataclass
+class EventState:
+    last_bar_time: Dict[str, int]        # key=tf_name
+    last_signature: Optional[str]
+
+
+def default_event_state() -> EventState:
+    return EventState(last_bar_time={}, last_signature=None)
+
+
+def should_fire_event(
+    symbol: str,
+    tfs: List[str],
+    state: EventState,
+    config_path: str,
+) -> Tuple[bool, List[str], Dict[str, Any]]:
+    """
+    Decide whether to trigger an event.
+
+    Returns:
+      (fire, reasons, details)
+    """
+    reasons: List[str] = []
+    details: Dict[str, Any] = {"bars": {}, "signal": {}}
+
+    # 1) NEW_BAR (per TF)
+    new_bar = False
+    for tf_name in tfs:
+        tf_code = TF_MAP.get(tf_name)
+        if tf_code is None:
+            continue
+        bt = get_latest_bar_time(symbol, tf_code)
+        details["bars"][tf_name] = bt
+        if bt is None:
+            continue
+        prev = state.last_bar_time.get(tf_name)
+        if prev is None:
+            # first init does not count as event (prevents immediate burst)
+            state.last_bar_time[tf_name] = bt
+        elif bt != prev:
+            new_bar = True
+            state.last_bar_time[tf_name] = bt
+
+    if new_bar:
+        reasons.append("NEW_BAR")
+
+    # 2) SIGNAL_CHANGE (best-effort)
+    sig, sig_dbg = try_eval_signal_signature(config_path)
+    details["signal"] = {"signature": sig, "dbg": sig_dbg}
+
+    if sig is not None:
+        if state.last_signature is None:
+            # first signature init does not count as event
+            state.last_signature = sig
+        elif sig != state.last_signature:
+            reasons.append("SIGNAL_CHANGE")
+            state.last_signature = sig
+
+    fire = len(reasons) > 0
+    return fire, reasons, details
+
+
+# ----------------------------
+# Event Log (JSONL)
+# ----------------------------
+
+def append_jsonl(path: str, obj: Dict[str, Any]) -> None:
+    ensure_dir(path)
+    line = json_dumps_compact(obj)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+# ----------------------------
+# Executor Invocation (one-shot)
+# ----------------------------
+
+def run_mentor_executor(py_exe: str, config_path: str) -> Tuple[int, str]:
+    """
+    Calls mentor_executor.py as a subprocess (one-shot).
+    Fail-closed: returns non-zero code if failed.
+    """
+    cmd = [py_exe, "mentor_executor.py", "--config", config_path]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        out = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
+        return int(p.returncode), out.strip()
+    except Exception as e:
+        return 99, f"executor_call_failed: {type(e).__name__}: {e}"
+
+
+# ----------------------------
+# Main Runner
+# ----------------------------
 
 def main() -> int:
-    cfg = load_config()
+    config_path = os.environ.get("HIM_CONFIG", "config.json")
+    py_exe = sys.executable  # use current venv python
+
+    try:
+        cfg = load_config(config_path)
+    except Exception as e:
+        print(f"[FATAL] load_config failed: {e}")
+        return 2
 
     symbol = str(cfg.get("symbol", "GOLD"))
-    tick_max_age_sec = float(_safe_get(cfg, ("execution", "tick_max_age_sec"), 15))
+    tick_max_age_sec = safe_float(cfg_get(cfg, ["execution", "tick_max_age_sec"], 15), 15)
+    poll_sec = safe_float(cfg_get(cfg, ["commissioning", "poll_sec"], 1.0), 1.0)
 
-    print("============================================================")
-    print("HIM Commissioning Runner v1.0.1")
-    print("============================================================")
+    # Which timeframes define NEW_BAR event
+    # If not set, default to ["M5"] (practical commissioning TF)
+    tfs = cfg_get(cfg, ["commissioning", "event_timeframes"], ["M5"])
+    if not isinstance(tfs, list) or not tfs:
+        tfs = ["M5"]
+    tfs = [str(x).upper() for x in tfs if str(x).upper() in TF_MAP]
 
-    mt5_init_or_die()
+    events_log_path = str(cfg_get(cfg, ["commissioning", "events_log_path"], "logs/commissioning_events.jsonl"))
 
-    age, meta = get_tick_age_sec(symbol)
-    _print_kv("MT5 tick status", meta)
+    # MT5 init (fail-closed)
+    if not mt5.initialize():
+        print("[FATAL] mt5.initialize() failed")
+        return 3
 
-    if age is None:
-        print("\n[DECISION] tick missing -> treat as STALE -> replay commissioning")
-        return run_replay_commissioning(cfg)
+    # Ensure symbol selected/visible
+    sym_info = mt5.symbol_info(symbol)
+    if sym_info is None:
+        print(f"[FATAL] symbol_info is None for symbol={symbol}")
+        return 4
+    if not sym_info.visible:
+        mt5.symbol_select(symbol, True)
 
-    if age > tick_max_age_sec:
-        print(f"\n[DECISION] tick stale (age_sec={age:.2f} > max={tick_max_age_sec}) -> replay commissioning")
-        return run_replay_commissioning(cfg)
+    state = default_event_state()
 
-    print(f"\n[DECISION] tick fresh (age_sec={age:.2f} <= max={tick_max_age_sec}) -> run mentor_executor")
-    return run_live_executor()
+    print(json_dumps_compact({
+        "ts": utc_iso_now(),
+        "msg": "commissioning_runner_started",
+        "version": "v2.12.4",
+        "symbol": symbol,
+        "tick_max_age_sec": tick_max_age_sec,
+        "poll_sec": poll_sec,
+        "event_timeframes": tfs,
+        "events_log_path": events_log_path,
+    }))
+
+    while True:
+        try:
+            tick = get_tick_snapshot(symbol)
+            if tick is None:
+                # fail-closed: no tick => no event, no executor
+                append_jsonl(events_log_path, {
+                    "ts": utc_iso_now(),
+                    "type": "HEARTBEAT",
+                    "symbol": symbol,
+                    "ok": False,
+                    "reason": "NO_TICK",
+                })
+                time.sleep(poll_sec)
+                continue
+
+            if not tick_is_fresh(tick, tick_max_age_sec):
+                append_jsonl(events_log_path, {
+                    "ts": utc_iso_now(),
+                    "type": "HEARTBEAT",
+                    "symbol": symbol,
+                    "ok": False,
+                    "reason": "STALE_TICK",
+                    "tick_age_sec": tick.tick_age_sec,
+                    "tick_time": tick.tick_time,
+                    "server_time": tick.server_time,
+                })
+                time.sleep(poll_sec)
+                continue
+
+            fire, reasons, details = should_fire_event(symbol, tfs, state, config_path)
+            if not fire:
+                # quiet heartbeat (optional)
+                time.sleep(poll_sec)
+                continue
+
+            # Log the event (event-based)
+            event_payload = {
+                "ts": utc_iso_now(),
+                "type": "EVENT",
+                "symbol": symbol,
+                "reasons": reasons,
+                "tick": {
+                    "bid": tick.bid,
+                    "ask": tick.ask,
+                    "last": tick.last,
+                    "tick_time": tick.tick_time,
+                    "server_time": tick.server_time,
+                    "tick_age_sec": tick.tick_age_sec,
+                },
+                "details": details,
+            }
+            append_jsonl(events_log_path, event_payload)
+
+            # Trigger executor only on event
+            rc, out = run_mentor_executor(py_exe, config_path)
+            append_jsonl(events_log_path, {
+                "ts": utc_iso_now(),
+                "type": "EXECUTOR_RESULT",
+                "symbol": symbol,
+                "returncode": rc,
+                "output_tail": out[-4000:],  # prevent huge logs
+            })
+
+            # pacing
+            time.sleep(poll_sec)
+
+        except KeyboardInterrupt:
+            print(json_dumps_compact({"ts": utc_iso_now(), "msg": "stopped_by_user"}))
+            break
+        except Exception as e:
+            append_jsonl(events_log_path, {
+                "ts": utc_iso_now(),
+                "type": "ERROR",
+                "symbol": symbol,
+                "error": f"{type(e).__name__}: {e}",
+                "trace": traceback.format_exc(limit=3),
+            })
+            time.sleep(max(poll_sec, 1.0))
+
+    mt5.shutdown()
+    return 0
 
 
 if __name__ == "__main__":

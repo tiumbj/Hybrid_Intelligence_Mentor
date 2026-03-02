@@ -1,32 +1,29 @@
 """
 Hybrid Intelligence Mentor (HIM) Trading Engine
-Version: 2.12.0
+Version: 2.12.3
 
 Changelog:
-- 2.12.0 (2026-03-01):
-  - ADD: Breakout Adaptive Proximity Gate (MTF ADX-based)
-      - If mode=breakout and proximity_score < proximity_min_score:
-        - bypass proximity gate when ADX_MTF > adx_proximity_override (default 30.0)
-      - Does NOT bypass other gates: BOS / Supertrend / Vol expansion / RR floor / risk guard / validator.
-  - FIX: score output now reflects the active mode correctly
-      - sideway_scalp: score = proximity_score (0..1)
-      - breakout: score = proximity_score_bk (0..100)
-- 2.11.1 (2026-03-01):
-  - FIX: Restore MT5 data integration while adding Breakout mode (BOS + buffer + retest + Hybrid SL)
-  - ADD: breakout config knobs with sane defaults
-  - KEEP: sideway_scalp logic unchanged
-- 2.10.6 (2026-02-28):
-  - FIX: Prevent validator E_RR_FLOOR due to floating-point precision (RR epsilon)
-  - KEEP: strict RR floor, fail-closed behavior
+- 2.12.3 (2026-03-01):
+  - ADD: Audit fields for breakout gates
+      - retest_checked, retest_bypass_reason
+      - proximity_checked, proximity_bypass_reason
+      - gates: structured pass/fail summary (BOS/Retest/Proximity/VolExp/Supertrend/RR)
+  - ADD: Commissioning counters (in-memory runtime)
+      - counts for breakout evals, signals, bypass events, blocked_by reasons
+  - ADD: Optional JSONL logging (commissioning.enabled + commissioning.log_path)
+  - KEEP: Dynamic Retest Bypass using MTF ADX (breakout only) from v2.12.2
+  - KEEP: Adaptive Proximity Bypass using MTF ADX from v2.12.0+
+  - KEEP: Config load diagnostics (fail-closed but observable)
 
 Notes:
-- Intended for production-grade deterministic pipeline.
-- AI remains confirm-only (not in this module).
+- AI confirm-only (outside this module)
+- Validator/risk-guard remain external layers
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -36,14 +33,36 @@ import MetaTrader5 as mt5
 from config_resolver import resolve_effective_config
 
 
-ENGINE_VERSION = "2.12.0"
+ENGINE_VERSION = "2.12.3"
 
 
 class TradingEngine:
     def __init__(self, config_path: str = "config.json"):
         self.config_path = config_path
+        self.last_config_error: Optional[str] = None
+        self.config_path_used: Optional[str] = None
         self.cfg = self.load_config()
 
+        # Commissioning counters (runtime, in-memory)
+        self.commissioning: Dict[str, Any] = {
+            "engine_version": ENGINE_VERSION,
+            "since_ts": time.time(),
+            "counts": {
+                "eval_total": 0,
+                "breakout_eval": 0,
+                "sideway_eval": 0,
+                "signals_buy": 0,
+                "signals_sell": 0,
+                "signals_none": 0,
+                "retest_bypass": 0,
+                "proximity_bypass": 0,
+            },
+            "blocked_by": {},  # reason -> count
+        }
+
+    # -----------------------------
+    # Safe helpers
+    # -----------------------------
     @staticmethod
     def safe_float(v: Any, default: float = 0.0) -> float:
         if v is None:
@@ -66,18 +85,48 @@ class TradingEngine:
     def clamp(x: float, lo: float, hi: float) -> float:
         return float(max(lo, min(hi, x)))
 
+    # -----------------------------
+    # Config load + diagnostics
+    # -----------------------------
+    def _resolve_config_path(self) -> str:
+        if os.path.isabs(self.config_path):
+            return self.config_path
+        return os.path.abspath(self.config_path)
+
     def load_config(self) -> Dict[str, Any]:
+        """
+        Fail-closed (returns {} on error) BUT keeps diagnostics in:
+        - self.last_config_error
+        - self.config_path_used
+        """
+        self.last_config_error = None
+        self.config_path_used = self._resolve_config_path()
+
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
+            with open(self.config_path_used, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            return resolve_effective_config(raw)
-        except Exception:
+            effective = resolve_effective_config(raw)
+            if not isinstance(effective, dict):
+                self.last_config_error = "effective_config_not_dict"
+                return {}
+            return effective
+        except FileNotFoundError:
+            self.last_config_error = f"config_not_found: {self.config_path_used}"
+            return {}
+        except json.JSONDecodeError as e:
+            self.last_config_error = f"config_json_decode_error: {e}"
+            return {}
+        except Exception as e:
+            self.last_config_error = f"config_load_error: {type(e).__name__}: {e}"
             return {}
 
     def reload_config(self) -> Dict[str, Any]:
         self.cfg = self.load_config()
         return self.cfg
 
+    # -----------------------------
+    # MT5
+    # -----------------------------
     @staticmethod
     def ensure_mt5() -> None:
         if mt5.initialize():
@@ -85,14 +134,6 @@ class TradingEngine:
         time.sleep(0.2)
         if not mt5.initialize():
             raise RuntimeError("MT5 initialize failed")
-
-    @staticmethod
-    def get_tick(symbol: str):
-        TradingEngine.ensure_mt5()
-        t = mt5.symbol_info_tick(symbol)
-        if t is None:
-            raise RuntimeError(f"no tick for symbol={symbol}")
-        return t
 
     @staticmethod
     def tf(tf_str: str) -> int:
@@ -153,14 +194,14 @@ class TradingEngine:
         for i in range(1, len(close)):
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
 
-        atr = np.full_like(close, np.nan, dtype=float)
+        out = np.full_like(close, np.nan, dtype=float)
         if len(close) < period + 1:
-            return atr
+            return out
 
-        atr[period] = np.nanmean(tr[1 : period + 1])
+        out[period] = np.nanmean(tr[1 : period + 1])
         for i in range(period + 1, len(close)):
-            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-        return atr
+            out[i] = (out[i - 1] * (period - 1) + tr[i]) / period
+        return out
 
     @staticmethod
     def rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
@@ -170,29 +211,19 @@ class TradingEngine:
         gain = np.where(delta > 0, delta, 0.0)
         loss = np.where(delta < 0, -delta, 0.0)
 
-        rsi = np.full_like(close, np.nan, dtype=float)
+        out = np.full_like(close, np.nan, dtype=float)
         if len(close) < period + 1:
-            return rsi
+            return out
 
         avg_gain = np.nanmean(gain[1 : period + 1])
         avg_loss = np.nanmean(loss[1 : period + 1])
 
-        if avg_loss == 0:
-            rsi[period] = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            rsi[period] = 100.0 - (100.0 / (1.0 + rs))
-
+        out[period] = 100.0 if avg_loss == 0 else (100.0 - (100.0 / (1.0 + (avg_gain / avg_loss))))
         for i in range(period + 1, len(close)):
             avg_gain = (avg_gain * (period - 1) + gain[i]) / period
             avg_loss = (avg_loss * (period - 1) + loss[i]) / period
-            if avg_loss == 0:
-                rsi[i] = 100.0
-            else:
-                rs = avg_gain / avg_loss
-                rsi[i] = 100.0 - (100.0 / (1.0 + rs))
-
-        return rsi
+            out[i] = 100.0 if avg_loss == 0 else (100.0 - (100.0 / (1.0 + (avg_gain / avg_loss))))
+        return out
 
     @staticmethod
     def bollinger(close: np.ndarray, period: int = 20, std_mult: float = 2.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -220,9 +251,9 @@ class TradingEngine:
         low = np.asarray(low, dtype=float)
         close = np.asarray(close, dtype=float)
 
-        adx = np.full_like(close, np.nan, dtype=float)
+        out = np.full_like(close, np.nan, dtype=float)
         if len(close) < period + 2:
-            return adx
+            return out
 
         up_move = high[1:] - high[:-1]
         down_move = low[:-1] - low[1:]
@@ -239,19 +270,16 @@ class TradingEngine:
         for i in range(period, len(tr)):
             atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
 
-        plus_di = np.full_like(tr, np.nan, dtype=float)
-        minus_di = np.full_like(tr, np.nan, dtype=float)
-
         plus_dm_sm = np.full_like(plus_dm, np.nan, dtype=float)
         minus_dm_sm = np.full_like(minus_dm, np.nan, dtype=float)
-
         plus_dm_sm[period - 1] = np.nanmean(plus_dm[:period])
         minus_dm_sm[period - 1] = np.nanmean(minus_dm[:period])
-
         for i in range(period, len(plus_dm)):
             plus_dm_sm[i] = (plus_dm_sm[i - 1] * (period - 1) + plus_dm[i]) / period
             minus_dm_sm[i] = (minus_dm_sm[i - 1] * (period - 1) + minus_dm[i]) / period
 
+        plus_di = np.full_like(tr, np.nan, dtype=float)
+        minus_di = np.full_like(tr, np.nan, dtype=float)
         for i in range(period - 1, len(tr)):
             if atr[i] and atr[i] > 0:
                 plus_di[i] = 100.0 * (plus_dm_sm[i] / atr[i])
@@ -272,8 +300,8 @@ class TradingEngine:
             for i in range(start + 1, len(tr)):
                 adx_tr[i] = (adx_tr[i - 1] * (period - 1) + dx[i]) / period
 
-        adx[1:] = adx_tr
-        return adx
+        out[1:] = adx_tr
+        return out
 
     @staticmethod
     def supertrend(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 10, mult: float = 3.0) -> Tuple[np.ndarray, np.ndarray]:
@@ -360,6 +388,9 @@ class TradingEngine:
 
         return trend, float(bos_hi), float(bos_lo)
 
+    # -----------------------------
+    # Mode knobs
+    # -----------------------------
     def _get_sideway_knobs(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         c = cfg.get("sideway_scalp", {}) or {}
         adx_period = self.safe_int(c.get("adx_period", 14), 14)
@@ -378,32 +409,14 @@ class TradingEngine:
             "rsi_oversold": self.clamp(self.safe_float(c.get("rsi_oversold", 30.0), 30.0), 5.0, 50.0),
             "require_confirmation": bool(c.get("require_confirmation", True)),
             "touch_buffer_atr": self.clamp(self.safe_float(c.get("touch_buffer_atr", 0.10), 0.10), 0.0, 0.50),
-
-            # Adaptive trigger
             "near_trigger_atr": self.clamp(self.safe_float(c.get("near_trigger_atr", 0.50), 0.50), 0.0, 2.0),
             "allow_soft_trigger": bool(c.get("allow_soft_trigger", True)),
             "rsi_soft_band": self.clamp(self.safe_float(c.get("rsi_soft_band", 10.0), 10.0), 0.0, 25.0),
-
-            # Proximity scoring
             "proximity_window_atr": self.clamp(self.safe_float(c.get("proximity_window_atr", 1.00), 1.00), 0.10, 5.0),
-
-            # Minimum proximity score to allow SOFT-ZONE triggers (quality gate)
             "proximity_score_min": self.clamp(self.safe_float(c.get("proximity_score_min", 0.70), 0.70), 0.0, 1.0),
         }
 
     def _get_breakout_knobs(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Breakout mode knobs (mode=breakout)
-
-        - confirm_buffer_atr: ต้องปิดเหนือ/ใต้ BOS level ด้วย buffer*ATR เพื่อกันไส้เทียนหลอก
-        - retest_required: ต้องมีการ retest level ภายใน lookback bars
-        - retest_band_atr: ระยะยอมรับ retest รอบ level (เป็น ATR multiple)
-        - sl_buffer_atr: บัฟเฟอร์ SL เพิ่มจากโครงสร้าง (structure) ด้วยความผันผวน (ATR)
-        - bb_width_atr_min: volatility expansion gate (BBWidth/ATR ต้อง >= ค่านี้)
-
-        - proximity_threshold_atr / proximity_min_score: proximity gate (late-entry filter)
-        - adx_proximity_override: if ADX_MTF > this => bypass proximity gate (Adaptive)
-        """
         b = cfg.get("breakout", {}) or {}
 
         confirm_buffer_atr = self.clamp(self.safe_float(b.get("confirm_buffer_atr", 0.05), 0.05), 0.0, 1.0)
@@ -412,10 +425,8 @@ class TradingEngine:
         retest_lookback_bars = max(self.safe_int(b.get("retest_lookback_bars", 5), 5), 2)
 
         sl_buffer_atr = self.clamp(
-            self.safe_float(
-                b.get("sl_buffer_atr", max(confirm_buffer_atr, retest_band_atr, 0.10)),
-                max(confirm_buffer_atr, retest_band_atr, 0.10),
-            ),
+            self.safe_float(b.get("sl_buffer_atr", max(confirm_buffer_atr, retest_band_atr, 0.10)),
+                            max(confirm_buffer_atr, retest_band_atr, 0.10)),
             0.0,
             5.0,
         )
@@ -425,8 +436,11 @@ class TradingEngine:
         proximity_threshold_atr = self.clamp(self.safe_float(b.get("proximity_threshold_atr", 1.50), 1.50), 0.1, 10.0)
         proximity_min_score = self.clamp(self.safe_float(b.get("proximity_min_score", 0.0), 0.0), 0.0, 100.0)
 
-        # NEW (v2.12.0): Adaptive bypass threshold using MTF ADX
+        # Adaptive proximity bypass (existing)
         adx_proximity_override = self.clamp(self.safe_float(b.get("adx_proximity_override", 30.0), 30.0), 0.0, 100.0)
+
+        # Dynamic retest bypass (v2.12.2+)
+        dynamic_retest_bypass_adx = self.clamp(self.safe_float(b.get("dynamic_retest_bypass_adx", 35.0), 35.0), 0.0, 100.0)
 
         return {
             "confirm_buffer_atr": confirm_buffer_atr,
@@ -438,16 +452,45 @@ class TradingEngine:
             "proximity_threshold_atr": proximity_threshold_atr,
             "proximity_min_score": proximity_min_score,
             "adx_proximity_override": adx_proximity_override,
+            "dynamic_retest_bypass_adx": dynamic_retest_bypass_adx,
         }
 
+    # -----------------------------
+    # Commissioning utilities
+    # -----------------------------
+    def _count_blocked(self, blocked_by: Optional[str]) -> None:
+        if not blocked_by:
+            return
+        d = self.commissioning.get("blocked_by", {})
+        d[blocked_by] = int(d.get(blocked_by, 0)) + 1
+        self.commissioning["blocked_by"] = d
+
+    def _maybe_log_jsonl(self, cfg: Dict[str, Any], row: Dict[str, Any]) -> None:
+        c = cfg.get("commissioning", {}) or {}
+        if not bool(c.get("enabled", False)):
+            return
+        path = str(c.get("log_path", "logs/commissioning.jsonl"))
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            # fail-safe: never break engine
+            return
+
+    # -----------------------------
+    # Main
+    # -----------------------------
     def generate_signal_package(self) -> Dict[str, Any]:
         cfg = self.reload_config()
+        self.commissioning["counts"]["eval_total"] = int(self.commissioning["counts"]["eval_total"]) + 1
+
+        config_load_ok = bool(cfg) and (self.last_config_error is None)
 
         symbol = str(cfg.get("symbol", "GOLD"))
         mode = str(cfg.get("mode", "balanced")).strip().lower()
         tf_cfg = cfg.get("timeframes", {}) or {}
 
-        # Risk contract: prefer cfg.risk.* ; fallback to legacy cfg.atr.*
         risk_cfg = cfg.get("risk", {}) or {}
         if not risk_cfg:
             legacy_atr = cfg.get("atr", {}) or {}
@@ -466,20 +509,37 @@ class TradingEngine:
         sens_mtf = self.safe_int(sens_cfg.get("mtf", 4), 4)
         sens_ltf = self.safe_int(sens_cfg.get("ltf", 3), 3)
 
-        # NOTE: timeframes default must reflect your current config conventions
-        htf = str(tf_cfg.get("htf", "H4"))
-        mtf = str(tf_cfg.get("mtf", "H1"))
-        ltf = str(tf_cfg.get("ltf", "M15"))
+        htf = str(tf_cfg.get("htf", "H1"))
+        mtf = str(tf_cfg.get("mtf", "M15"))
+        ltf = str(tf_cfg.get("ltf", "M5"))
 
         blocked_reasons = []
         watch_state = "NONE"
         debug: Dict[str, Any] = {}
+
+        # Gate audit structure
+        gates = {
+            "bias_ok": None,
+            "supertrend_ok": None,
+            "vol_expansion_ok": None,
+            "bos_ok": None,
+            "bos_break_ok": None,
+            "retest_checked": False,
+            "retest_ok": None,
+            "retest_bypass_reason": None,
+            "proximity_checked": False,
+            "proximity_ok": None,
+            "proximity_bypass_reason": None,
+            "rr_ok": None,
+        }
 
         try:
             htf_data = self.get_data(symbol, self.tf(htf), 600)
             mtf_data = self.get_data(symbol, self.tf(mtf), 800)
             ltf_data = self.get_data(symbol, self.tf(ltf), 1200)
         except Exception as e:
+            self.commissioning["counts"]["signals_none"] = int(self.commissioning["counts"]["signals_none"]) + 1
+            self._count_blocked("no_data")
             return {
                 "symbol": symbol,
                 "direction": "NONE",
@@ -491,7 +551,16 @@ class TradingEngine:
                 "confidence_py": 0,
                 "bos": False,
                 "supertrend_ok": False,
-                "context": {"blocked_by": "no_data", "error": str(e), "engine_version": ENGINE_VERSION},
+                "context": {
+                    "blocked_by": "no_data",
+                    "error": str(e),
+                    "engine_version": ENGINE_VERSION,
+                    "mode": mode,
+                    "config_load_ok": config_load_ok,
+                    "config_path_used": self.config_path_used,
+                    "config_error": self.last_config_error,
+                    "gates": gates,
+                },
             }
 
         htf_trend, _, _ = self.structure(htf_data, sens_htf)
@@ -516,6 +585,7 @@ class TradingEngine:
         st_dir = "bullish" if int(st_dir_arr[-1]) == 1 else "bearish"
         st_value = float(st_line[-1]) if len(st_line) else float("nan")
 
+        # Bias (HTF first, then MTF fallback)
         if mode == "sideway_scalp":
             direction_bias = "NEUTRAL"
             bias_source = "SIDEWAY_MODE"
@@ -537,6 +607,9 @@ class TradingEngine:
             else:
                 blocked_reasons.append("no_clear_bias")
 
+        gates["bias_ok"] = bool(direction_bias in ("BUY", "SELL") or mode == "sideway_scalp")
+
+        # Supertrend filter (for non-sideway)
         supertrend_ok = True if mode == "sideway_scalp" else False
         if mode != "sideway_scalp":
             if direction_bias == "BUY" and st_dir == "bullish":
@@ -546,6 +619,7 @@ class TradingEngine:
             else:
                 if direction_bias in ("BUY", "SELL"):
                     blocked_reasons.append("supertrend_conflict")
+        gates["supertrend_ok"] = bool(supertrend_ok)
 
         direction_out = "NONE"
         entry_candidate = None
@@ -553,31 +627,27 @@ class TradingEngine:
         tp_candidate = None
         rr = 0.0
 
-        sideway_ctx: Dict[str, Any] = {}
+        ctx: Dict[str, Any] = {}
 
-        # sideway proximity score (0..1)
-        distance_buy = float("nan")
-        distance_sell = float("nan")
-        proximity_side = "NONE"
-        proximity_best_dist = float("nan")
-        proximity_score = 0.0
-
-        # breakout proximity score (0..100)
+        proximity_score_side = 0.0
         proximity_score_bk = 0.0
         proximity_bypassed_due_to_high_adx = False
+
+        retest_bypassed_due_to_high_adx = False
+        dynamic_retest_bypass_adx_used: Optional[float] = None
         adx_proximity_override_used: Optional[float] = None
 
         score_out = 0.0
 
         if mode == "sideway_scalp":
+            self.commissioning["counts"]["sideway_eval"] = int(self.commissioning["counts"]["sideway_eval"]) + 1
             k = self._get_sideway_knobs(cfg)
 
             adx_arr = self.adx(mtf_high, mtf_low, mtf_close, k["adx_period"])
             adx_val = float(adx_arr[-1]) if (len(adx_arr) and np.isfinite(adx_arr[-1])) else float("nan")
 
-            bb_u, bb_m, bb_l = self.bollinger(close, k["bb_period"], k["bb_std"])
+            bb_u, _, bb_l = self.bollinger(close, k["bb_period"], k["bb_std"])
             bb_upper = float(bb_u[-1]) if (len(bb_u) and np.isfinite(bb_u[-1])) else float("nan")
-            bb_mid = float(bb_m[-1]) if (len(bb_m) and np.isfinite(bb_m[-1])) else float("nan")
             bb_lower = float(bb_l[-1]) if (len(bb_l) and np.isfinite(bb_l[-1])) else float("nan")
 
             bb_width = float(bb_upper - bb_lower) if (np.isfinite(bb_upper) and np.isfinite(bb_lower)) else float("nan")
@@ -605,28 +675,16 @@ class TradingEngine:
             buy_trigger_level = (bb_lower + touch_buffer_points) if np.isfinite(bb_lower) else float("nan")
             sell_trigger_level = (bb_upper - touch_buffer_points) if np.isfinite(bb_upper) else float("nan")
 
-            if np.isfinite(buy_trigger_level):
-                distance_buy = float(ltf_close - buy_trigger_level)
-            if np.isfinite(sell_trigger_level):
-                distance_sell = float(sell_trigger_level - ltf_close)
+            dist_buy = float(ltf_close - buy_trigger_level) if np.isfinite(buy_trigger_level) else float("nan")
+            dist_sell = float(sell_trigger_level - ltf_close) if np.isfinite(sell_trigger_level) else float("nan")
 
-            d_buy_abs = abs(distance_buy) if np.isfinite(distance_buy) else float("inf")
-            d_sell_abs = abs(distance_sell) if np.isfinite(distance_sell) else float("inf")
-
-            if d_buy_abs < d_sell_abs:
-                proximity_side = "BUY"
-                proximity_best_dist = float(d_buy_abs)
-            else:
-                proximity_side = "SELL"
-                proximity_best_dist = float(d_sell_abs)
+            d_buy_abs = abs(dist_buy) if np.isfinite(dist_buy) else float("inf")
+            d_sell_abs = abs(dist_sell) if np.isfinite(dist_sell) else float("inf")
+            best_dist = float(min(d_buy_abs, d_sell_abs))
 
             window = float(max(k["proximity_window_atr"] * atr_val, 1e-9))
-            if np.isfinite(proximity_best_dist) and window > 0:
-                proximity_score = float(max(0.0, 1.0 - (proximity_best_dist / window)))
-            else:
-                proximity_score = 0.0
+            proximity_score_side = float(max(0.0, 1.0 - (best_dist / window))) if (np.isfinite(best_dist) and window > 0) else 0.0
 
-            # Trigger evaluation
             if len(blocked_reasons) == 0 and k["enabled"]:
                 buy_touch = np.isfinite(buy_trigger_level) and (ltf_close <= buy_trigger_level)
                 sell_touch = np.isfinite(sell_trigger_level) and (ltf_close >= sell_trigger_level)
@@ -642,37 +700,28 @@ class TradingEngine:
                 buy_confirm_soft = bullish_reversal or buy_soft_rsi
                 sell_confirm_soft = bearish_reversal or sell_soft_rsi
 
-                # Hard-touch stays allowed (no proximity gate)
                 buy_allowed = bool(buy_touch and buy_confirm_hard)
                 sell_allowed = bool(sell_touch and sell_confirm_hard)
 
-                # Soft-zone requires proximity score gate
                 if not buy_allowed and k["allow_soft_trigger"]:
-                    if buy_soft and buy_confirm_soft and (proximity_score >= float(k["proximity_score_min"])):
+                    if buy_soft and buy_confirm_soft and (proximity_score_side >= float(k["proximity_score_min"])):
                         buy_allowed = True
 
                 if not sell_allowed and k["allow_soft_trigger"]:
-                    if sell_soft and sell_confirm_soft and (proximity_score >= float(k["proximity_score_min"])):
+                    if sell_soft and sell_confirm_soft and (proximity_score_side >= float(k["proximity_score_min"])):
                         sell_allowed = True
 
-                # Mutual exclusion fail-closed
                 if buy_allowed and not sell_allowed:
                     direction_out = "BUY"
                 elif sell_allowed and not buy_allowed:
                     direction_out = "SELL"
 
-                # Candidate prices
                 if direction_out in ("BUY", "SELL") and atr_val > 0:
                     entry_candidate = float(ltf_close)
-                    if direction_out == "BUY":
-                        stop_candidate = float(entry_candidate - (atr_sl_mult * atr_val))
-                    else:
-                        stop_candidate = float(entry_candidate + (atr_sl_mult * atr_val))
+                    stop_candidate = float(entry_candidate - (atr_sl_mult * atr_val)) if direction_out == "BUY" else float(entry_candidate + (atr_sl_mult * atr_val))
 
                     rr_eps = 1e-6
                     target_rr = float(min_rr) + rr_eps
-                    debug["debug_target_rr"] = target_rr
-                    debug["debug_rr_eps"] = rr_eps
 
                     if direction_out == "BUY":
                         risk = float(entry_candidate - stop_candidate)
@@ -685,46 +734,29 @@ class TradingEngine:
                             tp_candidate = float(entry_candidate - (risk * target_rr))
                             rr = float((entry_candidate - tp_candidate) / risk)
 
-                    eps = 1e-9
-                    if rr < (float(min_rr) - eps):
+                    if rr < (float(min_rr) - 1e-9):
                         blocked_reasons.append("rr_below_floor")
 
-            sideway_ctx = {
+            ctx = {
                 "sideway": True,
                 "adx_val": adx_val,
-                "bb_upper": bb_upper,
-                "bb_mid": bb_mid,
-                "bb_lower": bb_lower,
-                "bb_width": bb_width,
                 "bb_width_atr": bb_width_atr,
                 "rsi_val": rsi_val,
-                "touch_buffer_atr": k["touch_buffer_atr"],
-                "near_trigger_atr": k["near_trigger_atr"],
-                "near_trigger_points": near_points,
-                "allow_soft_trigger": bool(k["allow_soft_trigger"]),
-                "require_confirmation": bool(k["require_confirmation"]),
-                "rsi_soft_band": k["rsi_soft_band"],
-                "proximity_window_atr": k["proximity_window_atr"],
-                "proximity_score_min": k["proximity_score_min"],
-                "buy_trigger_level": buy_trigger_level,
-                "sell_trigger_level": sell_trigger_level,
-                "distance_buy": distance_buy,
-                "distance_sell": distance_sell,
-                "proximity_side": proximity_side,
-                "proximity_best_dist": proximity_best_dist,
-                "proximity_score": proximity_score,
+                "proximity_score": proximity_score_side,
             }
 
-            score_out = float(proximity_score)
+            score_out = float(proximity_score_side)
 
         elif mode == "breakout":
+            self.commissioning["counts"]["breakout_eval"] = int(self.commissioning["counts"]["breakout_eval"]) + 1
             kb = self._get_breakout_knobs(cfg)
 
-            # MTF ADX (ตามที่คุณเลือก)
+            # MTF ADX
             adx_period_mtf = self.safe_int((cfg.get("sideway_scalp", {}) or {}).get("adx_period", 14), 14)
             adx_arr = self.adx(mtf_high, mtf_low, mtf_close, adx_period_mtf)
             adx_val = float(adx_arr[-1]) if (len(adx_arr) and np.isfinite(adx_arr[-1])) else float("nan")
 
+            # Vol-expansion using BB
             sw = cfg.get("sideway_scalp", {}) or {}
             bb_period = self.safe_int(sw.get("bb_period", 20), 20)
             bb_std = self.safe_float(sw.get("bb_std", 2.0), 2.0)
@@ -735,16 +767,22 @@ class TradingEngine:
             bb_width = float(bb_upper - bb_lower) if (np.isfinite(bb_upper) and np.isfinite(bb_lower)) else float("nan")
             bb_width_atr = float(bb_width / atr_val) if (atr_val > 0 and np.isfinite(bb_width)) else float("nan")
 
+            # Gate: vol expansion
+            vol_ok = bool(np.isfinite(bb_width_atr) and bb_width_atr >= float(kb["bb_width_atr_min"]))
+            gates["vol_expansion_ok"] = vol_ok
+            if not vol_ok:
+                blocked_reasons.append("no_vol_expansion")
+
+            # Gate: bias + supertrend already set above
             if direction_bias not in ("BUY", "SELL"):
                 blocked_reasons.append("no_clear_bias")
             if direction_bias in ("BUY", "SELL") and not supertrend_ok:
                 blocked_reasons.append("supertrend_conflict")
 
-            if not (np.isfinite(bb_width_atr) and bb_width_atr >= float(kb["bb_width_atr_min"])):
-                blocked_reasons.append("no_vol_expansion")
-
             bos_ref_high = float(bos_hi) if np.isfinite(bos_hi) else float("nan")
             bos_ref_low = float(bos_lo) if np.isfinite(bos_lo) else float("nan")
+            bos_ok = bool(np.isfinite(bos_ref_high) and np.isfinite(bos_ref_low))
+            gates["bos_ok"] = bos_ok
 
             confirm_buf = float(kb["confirm_buffer_atr"] * atr_val) if atr_val > 0 else 0.0
             retest_band = float(kb["retest_band_atr"] * atr_val) if atr_val > 0 else 0.0
@@ -753,128 +791,186 @@ class TradingEngine:
             lookback = int(kb["retest_lookback_bars"])
             lookback = max(2, min(lookback, len(close)))
 
-            # Adaptive override threshold
             adx_proximity_override_used = float(kb["adx_proximity_override"])
+            dynamic_retest_bypass_adx_used = float(kb["dynamic_retest_bypass_adx"])
 
-            def _maybe_bypass_proximity_if_high_adx() -> bool:
-                # Fail-closed: ADX invalid => no bypass
-                if not np.isfinite(adx_val):
-                    return False
-                return bool(adx_val > adx_proximity_override_used)
+            def _maybe_bypass_proximity() -> bool:
+                return bool(np.isfinite(adx_val) and (adx_val > adx_proximity_override_used))
 
+            def _maybe_bypass_retest() -> bool:
+                return bool(np.isfinite(adx_val) and (adx_val > dynamic_retest_bypass_adx_used))
+
+            # Evaluate breakout direction
             if len(blocked_reasons) == 0:
-                if direction_bias == "BUY":
-                    if not (np.isfinite(bos_ref_high) and np.isfinite(bos_ref_low)):
-                        blocked_reasons.append("no_bos_refs")
-                    else:
+                if not bos_ok:
+                    blocked_reasons.append("no_bos_refs")
+                else:
+                    if direction_bias == "BUY":
                         level = bos_ref_high
-                        confirm_level = level + confirm_buf
-                        if not (ltf_close > confirm_level):
+                        # Gate: BOS break
+                        bos_break_ok = bool(ltf_close > (level + confirm_buf))
+                        gates["bos_break_ok"] = bos_break_ok
+                        if not bos_break_ok:
                             blocked_reasons.append("no_bos_break")
                         else:
+                            # Gate: Retest (checked only when required)
                             if bool(kb["retest_required"]):
-                                recent_low = float(np.nanmin(low[-lookback:]))
-                                if not (np.isfinite(recent_low) and recent_low <= (level + retest_band) and ltf_close > level):
-                                    blocked_reasons.append("no_retest")
+                                gates["retest_checked"] = True
+                                if _maybe_bypass_retest():
+                                    retest_bypassed_due_to_high_adx = True
+                                    gates["retest_ok"] = True
+                                    gates["retest_bypass_reason"] = "adx_high"
+                                    self.commissioning["counts"]["retest_bypass"] = int(self.commissioning["counts"]["retest_bypass"]) + 1
+                                else:
+                                    recent_low = float(np.nanmin(low[-lookback:]))
+                                    retest_ok = bool(np.isfinite(recent_low) and recent_low <= (level + retest_band) and ltf_close > level)
+                                    gates["retest_ok"] = retest_ok
+                                    if not retest_ok:
+                                        blocked_reasons.append("no_retest")
+                            else:
+                                gates["retest_checked"] = False
+                                gates["retest_ok"] = True
 
-                            # Proximity score (0..100)
+                            # Gate: Proximity (always checked)
+                            gates["proximity_checked"] = True
                             if atr_val > 0 and float(kb["proximity_threshold_atr"]) > 0:
                                 dist_atr = float(abs(ltf_close - level) / atr_val)
                                 th = float(kb["proximity_threshold_atr"])
                                 proximity_score_bk = float(max(0.0, (th - dist_atr) / th) * 100.0)
+                            else:
+                                proximity_score_bk = 0.0
 
-                            # Proximity gate with adaptive bypass
-                            if proximity_score_bk < float(kb["proximity_min_score"]):
-                                if _maybe_bypass_proximity_if_high_adx():
+                            prox_ok = bool(proximity_score_bk >= float(kb["proximity_min_score"]))
+                            if prox_ok:
+                                gates["proximity_ok"] = True
+                            else:
+                                if _maybe_bypass_proximity():
                                     proximity_bypassed_due_to_high_adx = True
+                                    gates["proximity_ok"] = True
+                                    gates["proximity_bypass_reason"] = "adx_high"
+                                    self.commissioning["counts"]["proximity_bypass"] = int(self.commissioning["counts"]["proximity_bypass"]) + 1
                                 else:
+                                    gates["proximity_ok"] = False
                                     blocked_reasons.append("low_proximity_score")
 
+                            # Build trade if all ok
                             if len(blocked_reasons) == 0:
                                 direction_out = "BUY"
                                 entry_candidate = float(ltf_close)
 
-                                sl_base = bos_ref_low if np.isfinite(bos_ref_low) else float(entry_candidate - (atr_sl_mult * atr_val))
+                                sl_base = bos_ref_low
                                 stop_candidate = float(sl_base - sl_buf)
 
                                 risk = float(entry_candidate - stop_candidate)
                                 if risk <= 0:
                                     blocked_reasons.append("bad_risk")
+                                    gates["rr_ok"] = False
                                 else:
-                                    rr_eps = 1e-6
-                                    target_rr = float(min_rr) + rr_eps
-                                    tp_candidate = float(entry_candidate + (risk * target_rr))
+                                    tp_candidate = float(entry_candidate + (risk * (float(min_rr) + 1e-6)))
                                     rr = float((tp_candidate - entry_candidate) / risk)
+                                    gates["rr_ok"] = bool(rr >= float(min_rr))
 
-                else:  # SELL
-                    if not (np.isfinite(bos_ref_low) and np.isfinite(bos_ref_high)):
-                        blocked_reasons.append("no_bos_refs")
-                    else:
+                                    if not gates["rr_ok"]:
+                                        blocked_reasons.append("rr_below_floor")
+
+                    elif direction_bias == "SELL":
                         level = bos_ref_low
-                        confirm_level = level - confirm_buf
-                        if not (ltf_close < confirm_level):
+                        bos_break_ok = bool(ltf_close < (level - confirm_buf))
+                        gates["bos_break_ok"] = bos_break_ok
+                        if not bos_break_ok:
                             blocked_reasons.append("no_bos_break")
                         else:
                             if bool(kb["retest_required"]):
-                                recent_high = float(np.nanmax(high[-lookback:]))
-                                if not (np.isfinite(recent_high) and recent_high >= (level - retest_band) and ltf_close < level):
-                                    blocked_reasons.append("no_retest")
+                                gates["retest_checked"] = True
+                                if _maybe_bypass_retest():
+                                    retest_bypassed_due_to_high_adx = True
+                                    gates["retest_ok"] = True
+                                    gates["retest_bypass_reason"] = "adx_high"
+                                    self.commissioning["counts"]["retest_bypass"] = int(self.commissioning["counts"]["retest_bypass"]) + 1
+                                else:
+                                    recent_high = float(np.nanmax(high[-lookback:]))
+                                    retest_ok = bool(np.isfinite(recent_high) and recent_high >= (level - retest_band) and ltf_close < level)
+                                    gates["retest_ok"] = retest_ok
+                                    if not retest_ok:
+                                        blocked_reasons.append("no_retest")
+                            else:
+                                gates["retest_checked"] = False
+                                gates["retest_ok"] = True
 
-                            # Proximity score (0..100)
+                            gates["proximity_checked"] = True
                             if atr_val > 0 and float(kb["proximity_threshold_atr"]) > 0:
                                 dist_atr = float(abs(ltf_close - level) / atr_val)
                                 th = float(kb["proximity_threshold_atr"])
                                 proximity_score_bk = float(max(0.0, (th - dist_atr) / th) * 100.0)
+                            else:
+                                proximity_score_bk = 0.0
 
-                            # Proximity gate with adaptive bypass
-                            if proximity_score_bk < float(kb["proximity_min_score"]):
-                                if _maybe_bypass_proximity_if_high_adx():
+                            prox_ok = bool(proximity_score_bk >= float(kb["proximity_min_score"]))
+                            if prox_ok:
+                                gates["proximity_ok"] = True
+                            else:
+                                if _maybe_bypass_proximity():
                                     proximity_bypassed_due_to_high_adx = True
+                                    gates["proximity_ok"] = True
+                                    gates["proximity_bypass_reason"] = "adx_high"
+                                    self.commissioning["counts"]["proximity_bypass"] = int(self.commissioning["counts"]["proximity_bypass"]) + 1
                                 else:
+                                    gates["proximity_ok"] = False
                                     blocked_reasons.append("low_proximity_score")
 
                             if len(blocked_reasons) == 0:
                                 direction_out = "SELL"
                                 entry_candidate = float(ltf_close)
 
-                                sl_base = bos_ref_high if np.isfinite(bos_ref_high) else float(entry_candidate + (atr_sl_mult * atr_val))
+                                sl_base = bos_ref_high
                                 stop_candidate = float(sl_base + sl_buf)
 
                                 risk = float(stop_candidate - entry_candidate)
                                 if risk <= 0:
                                     blocked_reasons.append("bad_risk")
+                                    gates["rr_ok"] = False
                                 else:
-                                    rr_eps = 1e-6
-                                    target_rr = float(min_rr) + rr_eps
-                                    tp_candidate = float(entry_candidate - (risk * target_rr))
+                                    tp_candidate = float(entry_candidate - (risk * (float(min_rr) + 1e-6)))
                                     rr = float((entry_candidate - tp_candidate) / risk)
+                                    gates["rr_ok"] = bool(rr >= float(min_rr))
+                                    if not gates["rr_ok"]:
+                                        blocked_reasons.append("rr_below_floor")
 
-            sideway_ctx = {
+            ctx = {
                 "breakout": True,
                 "adx_val": adx_val,
                 "adx_period_mtf": int(adx_period_mtf),
-                "adx_proximity_override": float(adx_proximity_override_used) if adx_proximity_override_used is not None else None,
+                "adx_proximity_override": float(adx_proximity_override_used),
+                "dynamic_retest_bypass_adx": float(dynamic_retest_bypass_adx_used),
                 "proximity_bypassed_due_to_high_adx": bool(proximity_bypassed_due_to_high_adx),
+                "retest_bypassed_due_to_high_adx": bool(retest_bypassed_due_to_high_adx),
                 "bb_width_atr": bb_width_atr,
                 "bb_width_atr_min": float(kb["bb_width_atr_min"]),
-                "confirm_buffer_atr": float(kb["confirm_buffer_atr"]),
-                "retest_required": bool(kb["retest_required"]),
-                "retest_band_atr": float(kb["retest_band_atr"]),
-                "retest_lookback_bars": int(kb["retest_lookback_bars"]),
-                "sl_buffer_atr": float(kb["sl_buffer_atr"]),
                 "proximity_score": float(proximity_score_bk),
                 "proximity_min_score": float(kb["proximity_min_score"]),
                 "proximity_threshold_atr": float(kb["proximity_threshold_atr"]),
+                "retest_required": bool(kb["retest_required"]),
+                "retest_band_atr": float(kb["retest_band_atr"]),
+                "retest_lookback_bars": int(kb["retest_lookback_bars"]),
             }
 
             score_out = float(proximity_score_bk)
 
+        # Finalize + counters + logging
         blocked_by = ",".join(blocked_reasons) if blocked_reasons else None
-
         if debug:
-            sideway_ctx["debug"] = debug
+            ctx["debug"] = debug
 
-        return {
+        if direction_out == "BUY":
+            self.commissioning["counts"]["signals_buy"] = int(self.commissioning["counts"]["signals_buy"]) + 1
+        elif direction_out == "SELL":
+            self.commissioning["counts"]["signals_sell"] = int(self.commissioning["counts"]["signals_sell"]) + 1
+        else:
+            self.commissioning["counts"]["signals_none"] = int(self.commissioning["counts"]["signals_none"]) + 1
+
+        self._count_blocked(blocked_by)
+
+        out = {
             "symbol": symbol,
             "direction": direction_out,
             "entry_candidate": entry_candidate,
@@ -889,6 +985,9 @@ class TradingEngine:
                 "blocked_by": blocked_by,
                 "engine_version": ENGINE_VERSION,
                 "mode": mode,
+                "config_load_ok": config_load_ok,
+                "config_path_used": self.config_path_used,
+                "config_error": self.last_config_error,
                 "HTF_trend": htf_trend,
                 "MTF_trend": mtf_trend,
                 "LTF_trend": ltf_trend,
@@ -903,6 +1002,31 @@ class TradingEngine:
                 "atr_period": int(atr_period),
                 "atr_sl_mult": float(atr_sl_mult),
                 "min_rr": float(min_rr),
-                **sideway_ctx,
+                "gates": gates,
+                # snapshot of commissioning counters (lightweight)
+                "commissioning_counts": self.commissioning["counts"],
+                **ctx,
             },
         }
+
+        # Optional: JSONL logging row
+        log_row = {
+            "ts": time.time(),
+            "engine_version": ENGINE_VERSION,
+            "symbol": symbol,
+            "mode": mode,
+            "direction": direction_out,
+            "blocked_by": blocked_by,
+            "adx_val": ctx.get("adx_val"),
+            "proximity_score": ctx.get("proximity_score"),
+            "proximity_bypassed": ctx.get("proximity_bypassed_due_to_high_adx"),
+            "retest_bypassed": ctx.get("retest_bypassed_due_to_high_adx"),
+            "gates": gates,
+            "entry": entry_candidate,
+            "sl": stop_candidate,
+            "tp": tp_candidate,
+            "rr": rr,
+        }
+        self._maybe_log_jsonl(cfg, log_row)
+
+        return out

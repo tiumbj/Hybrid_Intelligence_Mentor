@@ -1,30 +1,28 @@
 """
 HIM Config Resolver
-Version: 1.0.0
+Version: 1.0.1
 
 Purpose:
-- Create "effective config" by deep-merging:
-  base(root) + profiles[mode] overrides
-- Enforce consistent runtime behavior across engine/executor/telegram/etc.
+- Create "effective config" by deep-merging: base(root) + profiles[mode] overrides
+- Enforce consistent runtime behavior across engine/executor/dashboard/etc.
 
 Rules:
 - If mode missing => use base config only
 - If profiles[mode] missing => use base config only
 - Deep-merge dicts, overwrite scalars/lists
+- Profile key lookup is case-insensitive (fix: mode upper vs profiles lower)
+
+Changelog:
+- 1.0.1 (2026-03-01): Fix case-insensitive lookup for profiles keys.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Deep merge: base <- override
-    - dict merges recursively
-    - list/scalar overwrite
-    """
     out: Dict[str, Any] = deepcopy(base)
     for k, v in (override or {}).items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
@@ -34,40 +32,48 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return out
 
 
+def _get_profile_case_insensitive(profiles: Dict[str, Any], mode_upper: str) -> Dict[str, Any] | None:
+    if not isinstance(profiles, dict):
+        return None
+    # direct hit
+    prof = profiles.get(mode_upper)
+    if isinstance(prof, dict):
+        return prof
+    # try lower
+    prof = profiles.get(mode_upper.lower())
+    if isinstance(prof, dict):
+        return prof
+    # try exact case-insensitive scan
+    for k, v in profiles.items():
+        if isinstance(k, str) and k.strip().upper() == mode_upper and isinstance(v, dict):
+            return v
+    return None
+
+
 def resolve_effective_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Return effective config = (root without profiles) + profiles[mode].
-    Keeps original cfg untouched.
-    """
     if not isinstance(cfg, dict):
         return {}
 
-    mode = str(cfg.get("mode", "")).strip().upper()
+    mode_upper = str(cfg.get("mode", "")).strip().upper()
     profiles = cfg.get("profiles", {}) if isinstance(cfg.get("profiles", {}), dict) else {}
 
-    # Base = root config without "profiles" (so profile doesn't get nested into runtime)
     base = deepcopy(cfg)
     base.pop("profiles", None)
 
-    if not mode:
+    if not mode_upper:
         return base
 
-    prof = profiles.get(mode)
+    prof = _get_profile_case_insensitive(profiles, mode_upper)
     if not isinstance(prof, dict):
+        # Keep base.mode as-is if present
         return base
 
-    # Merge profile over base
     effective = _deep_merge(base, prof)
-
-    # Ensure effective.mode is the chosen mode (normalize)
-    effective["mode"] = mode
+    effective["mode"] = mode_upper
     return effective
 
 
 def summarize_effective_config(effective: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Small snapshot for logs/debug (safe to print).
-    """
     tf = effective.get("timeframes", {}) or {}
     risk = effective.get("risk", {}) or {}
     return {
