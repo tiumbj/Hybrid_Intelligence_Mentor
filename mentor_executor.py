@@ -1,434 +1,447 @@
 """
+Hybrid Intelligence Mentor (HIM)
 File: mentor_executor.py
-Path: C:\\Hybrid_Intelligence_Mentor\\mentor_executor.py
-Version: 2.10.1
+Version: v2.13.3 (Schema-Aligned to generate_signal_package + Evidence-Rich obs + blocked_by dedup)
+Date: 2026-03-02 (Asia/Bangkok)
 
 CHANGELOG
-- 2.10.1
-  - FIX: TRANSITION = HARD NO-TRADE ZONE (return before Engine/AI/RiskGuard)
-  - KEEP: Adaptive Strategy Router (SIDEWAY->sideway_scalp, TREND->breakout)
-  - KEEP: RiskGuard v1.0.0 + mt5.history_deals_get() (Option A)
-  - LIVE flag remains derived from effective config (router may force DRY_RUN)
+- v2.13.3:
+  - NEW: Pass-through selected engine context.metrics into obs.metrics (bounded whitelist)
+  - Keep: JSON 1-line compact output only
+  - Keep: Engine method auto-discovery (locks to generate_signal_package)
+  - Safety: Confirm-only (does NOT place orders)
+
+EVIDENCE (runtime)
+- Engine schema observed:
+  TOP_KEYS ['symbol','direction','entry_candidate','stop_candidate','tp_candidate','rr','score','confidence_py',
+            'bos','supertrend_ok','context']
+  context.blocked_by present as comma-separated string, with duplicates.
 
 SAFETY
-- If adaptive_regime == TRANSITION:
-    - Do NOT call engine
-    - Do NOT call AI
-    - Do NOT call RiskGuard
-    - Log: DEBUG_SKIP | transition_phase_guard
+- Confirm-only: does NOT place orders.
+- Fail-closed: exception -> ok=false JSON with short trace.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
-import logging
 import os
-from datetime import datetime, timezone, date, timedelta
-from typing import Any, Dict, Optional, Tuple
-
-import MetaTrader5 as mt5
-
-from ai_bridge_v1 import confirm_via_api
-from regime_switch import decide_regime
-from risk_guard_v1_0 import (
-    RiskGuard,
-    GuardConfig,
-    TradePlan,
-    MarketSnapshot,
-    AccountSnapshot,
-    PerformanceSnapshot,
-    GuardAction,
-)
-from strategy_router import build_effective_config_adaptive
-
-LOG = logging.getLogger("mentor_executor")
-
-_SENT_FINGERPRINTS: Dict[str, datetime] = {}
-_LAST_EXEC_UTC: Optional[datetime] = None
+import time
+import traceback
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 
-def _load_json(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+
+def utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+def json_dumps_compact(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
-def _ensure_symbol(symbol: str) -> None:
-    info = mt5.symbol_info(symbol)
-    if info is None:
-        raise RuntimeError(f"symbol not found: {symbol}")
-    if not info.visible:
-        mt5.symbol_select(symbol, True)
+def safe_float(x: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
 
 
-def _market_snapshot(symbol: str, *, atr: Optional[float]) -> MarketSnapshot:
-    tick = mt5.symbol_info_tick(symbol)
-    info = mt5.symbol_info(symbol)
-    if tick is None or info is None:
-        raise RuntimeError("market snapshot unavailable")
-
-    return MarketSnapshot(
-        tick_time_utc=datetime.fromtimestamp(int(tick.time), tz=timezone.utc),
-        bid=float(tick.bid),
-        ask=float(tick.ask),
-        point=float(info.point),
-        digits=int(info.digits),
-        atr=float(atr) if atr is not None else None,
-        bb_width=None,
-    )
+def safe_int(x: Any, default: Optional[int] = None) -> Optional[int]:
+    try:
+        if x is None:
+            return default
+        return int(x)
+    except Exception:
+        return default
 
 
-def _account_snapshot(symbol: str) -> AccountSnapshot:
-    acc = mt5.account_info()
-    if acc is None:
-        raise RuntimeError("account_info unavailable")
-
-    positions = mt5.positions_get(symbol=symbol)
-    net_dir = None
-    if positions and len(positions) > 0:
-        p0 = positions[0]
-        net_dir = "BUY" if int(p0.type) == int(mt5.POSITION_TYPE_BUY) else "SELL"
-
-    return AccountSnapshot(
-        equity=float(acc.equity),
-        balance=float(acc.balance),
-        positions_count=len(positions) if positions else 0,
-        net_position_direction=net_dir,
-    )
+def load_json(path: str, default: Any) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 
-def _performance_snapshot_today_via_deals_get() -> PerformanceSnapshot:
-    today = date.today()
-    start_utc = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
-    end_utc = _now_utc()
-
-    deals = mt5.history_deals_get(start_utc, end_utc)
-    if deals is None:
-        raise RuntimeError("history_deals_get returned None")
-
-    realized = 0.0
-    closed: list[Tuple[int, float]] = []
-
-    for d in deals:
-        profit = float(getattr(d, "profit", 0.0))
-        realized += profit
-
-        entry = getattr(d, "entry", None)
-        t = int(getattr(d, "time", 0))
-        try:
-            if entry is not None and int(entry) == int(mt5.DEAL_ENTRY_OUT):
-                closed.append((t, profit))
-        except Exception:
-            pass
-
-    closed.sort(key=lambda x: x[0])
-    streak = 0
-    for _, p in reversed(closed):
-        if p < 0:
-            streak += 1
-        elif p > 0:
-            break
-        else:
-            continue
-
-    return PerformanceSnapshot(
-        today=today,
-        realized_pl_today=float(realized),
-        consecutive_losses=int(streak),
-    )
+def cfg_get(cfg: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
+    cur: Any = cfg
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
 
-def _validate_stop_levels(symbol: str, sl: float, tp: float, entry: float, side: str) -> Tuple[bool, str]:
-    info = mt5.symbol_info(symbol)
-    if info is None:
-        return False, "no_symbol_info"
-
-    stop_level = int(getattr(info, "trade_stops_level", 0))
-    freeze_level = int(getattr(info, "trade_freeze_level", 0))
-    point = float(info.point) if float(info.point) > 0 else 0.0
-    if point <= 0:
-        return False, "bad_point"
-
-    min_dist = float(max(stop_level, freeze_level)) * point
-    if min_dist <= 0:
-        return True, ""
-
-    side_u = side.upper()
-    if side_u == "BUY":
-        if (entry - sl) < min_dist:
-            return False, f"sl_too_close(min_dist={min_dist})"
-        if (tp - entry) < min_dist:
-            return False, f"tp_too_close(min_dist={min_dist})"
+def normalize_blocked_by(x: Any) -> List[str]:
+    """
+    Normalize to list[str] and de-duplicate (preserve order).
+    Supports:
+    - list/tuple/set
+    - comma-separated string
+    - None
+    """
+    items: List[str] = []
+    if x is None:
+        items = []
+    elif isinstance(x, (list, tuple, set)):
+        for it in x:
+            s = str(it).strip()
+            if s:
+                items.append(s)
     else:
-        if (sl - entry) < min_dist:
-            return False, f"sl_too_close(min_dist={min_dist})"
-        if (entry - tp) < min_dist:
-            return False, f"tp_too_close(min_dist={min_dist})"
-    return True, ""
+        s = str(x).strip()
+        if s:
+            parts = [p.strip() for p in s.split(",")]
+            items = [p for p in parts if p]
+
+    seen = set()
+    out: List[str] = []
+    for it in items:
+        if it not in seen:
+            out.append(it)
+            seen.add(it)
+    return out
 
 
-def _build_risk_guard_config(cfg_eff: Dict[str, Any]) -> GuardConfig:
-    execution = cfg_eff.get("execution", {}) if isinstance(cfg_eff.get("execution", {}), dict) else {}
+# -----------------------------------------------------------------------------
+# Engine auto-discovery caller (best-effort, schema-agnostic)
+# -----------------------------------------------------------------------------
 
-    tick_max_age_sec = int(execution.get("tick_max_age_sec", 8))
-    max_spread_points = int(execution.get("max_spread_points", 300))
-    cooldown_sec = int(execution.get("cooldown_sec", execution.get("duplicate_cooldown_sec", 45)))
-
-    daily_loss_limit_pct = float(execution.get("daily_loss_limit_pct", 0.01))
-    max_consecutive_losses = int(execution.get("max_consecutive_losses", 3))
-
-    max_slippage_points = int(execution.get("max_slippage_points", execution.get("max_deviation_points", 80)))
-
-    max_positions = int(execution.get("max_positions", 1))
-    no_hedge = bool(execution.get("no_hedge", True))
-    dedup_window_sec = int(execution.get("dedup_window_sec", 90))
-
-    return GuardConfig(
-        tick_max_age_sec=max(1, tick_max_age_sec),
-        max_spread_points=max(1, max_spread_points),
-        max_positions=max(1, max_positions),
-        no_hedge=no_hedge,
-        dedup_window_sec=max(1, dedup_window_sec),
-        cooldown_sec=max(0, cooldown_sec),
-        daily_loss_limit_pct=max(0.0, daily_loss_limit_pct),
-        max_consecutive_losses=max(0, max_consecutive_losses),
-        max_slippage_points=max(0, max_slippage_points),
-        min_rr_exec=None,
-        fail_closed=True,
-    )
+def _to_dict_any(out: Any) -> Dict[str, Any]:
+    if isinstance(out, dict):
+        return out
+    if hasattr(out, "to_dict") and callable(getattr(out, "to_dict")):
+        d = out.to_dict()
+        return d if isinstance(d, dict) else {"repr": repr(d)}
+    if hasattr(out, "__dict__"):
+        return dict(out.__dict__)
+    return {"repr": repr(out)}
 
 
-def _prune_sent_fingerprints(now: datetime, *, keep_sec: int = 600) -> None:
-    cutoff = now - timedelta(seconds=max(1, keep_sec))
-    dead = [k for k, t in _SENT_FINGERPRINTS.items() if t < cutoff]
-    for k in dead:
-        _SENT_FINGERPRINTS.pop(k, None)
-
-
-def _send_market_order(symbol: str, side: str, lot: float, sl: float, tp: float, deviation: int) -> Tuple[bool, str]:
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        return False, "no_tick"
-
-    side_u = side.upper()
-    order_type = mt5.ORDER_TYPE_BUY if side_u == "BUY" else mt5.ORDER_TYPE_SELL
-    price = float(tick.ask if side_u == "BUY" else tick.bid)
-
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
-        "volume": float(lot),
-        "type": order_type,
-        "price": price,
-        "sl": float(sl),
-        "tp": float(tp),
-        "deviation": int(deviation),
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-        "comment": "HIM v2.10.1",
-    }
-
-    result = mt5.order_send(request)
-    if result is None:
-        return False, "order_send_none"
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        return False, f"order_send_failed(retcode={result.retcode})"
-    return True, f"order_ok(ticket={result.order})"
-
-
-def main() -> None:
-    global _LAST_EXEC_UTC
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-    cfg = _load_json("config.json")
-    symbol = str(cfg.get("symbol", "GOLD"))
-
-    if not mt5.initialize():
-        LOG.error("MT5 init failed: %s", mt5.last_error())
-        return
+def _call_method_safely(obj: Any, name: str, symbol: str, cfg: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], str]:
+    fn = getattr(obj, name, None)
+    if not callable(fn):
+        return False, None, "not_callable"
 
     try:
-        _ensure_symbol(symbol)
-
-        now = _now_utc()
-        _prune_sent_fingerprints(now)
-
-        # 1) Compute base regime metrics
-        decision, err = decide_regime(cfg, symbol)
-        if err:
-            LOG.info("DEBUG_SKIP | regime_error=%s", err)
-            return
-
-        # 2) Adaptive router: pick mode & effective config
-        cfg_eff, sel = build_effective_config_adaptive(cfg, decision)
-
-        mode_eff = str(cfg_eff.get("mode", "manual"))
-        live_eff = bool(cfg_eff.get("enable_execution", False))
-        lot = float(cfg_eff.get("lot", (cfg_eff.get("execution", {}) or {}).get("volume", 0.01)))
-
-        execution = cfg_eff.get("execution", {}) if isinstance(cfg_eff.get("execution", {}), dict) else {}
-        deviation = int(execution.get("deviation", execution.get("max_deviation_points", 20)))
-
-        ai_cfg = cfg_eff.get("ai", {}) if isinstance(cfg_eff.get("ai", {}), dict) else {}
-        api_url = ai_cfg.get("api_url", "http://127.0.0.1:5000/api/ai_confirm")
-        timeout_sec = float(ai_cfg.get("timeout_sec", 10))
-
-        os.makedirs(".state", exist_ok=True)
-        eff_path = ".state/effective_config.executor.json"
-        with open(eff_path, "w", encoding="utf-8") as f:
-            json.dump(cfg_eff, f, ensure_ascii=False, indent=2)
-
-        LOG.info(
-            "HIM Mentor Executor v2.10.1 | symbol=%s | mode=%s | LIVE=%s | lot=%.2f",
-            symbol, mode_eff, live_eff, lot
-        )
-
-        LOG.info(
-            "ROUTER | adaptive_regime=%s | mode_selected=%s | transition_dry_run=%s | adx=%.2f bbw=%.3f counts(on/off)=%d/%d",
-            sel.get("adaptive_regime"),
-            sel.get("mode_selected"),
-            bool(sel.get("transition_dry_run")),
-            float(sel.get("metrics", {}).get("adx", 0.0)),
-            float(sel.get("metrics", {}).get("bb_width_atr", 0.0)),
-            int(sel.get("metrics", {}).get("trend_on_count", 0)),
-            int(sel.get("metrics", {}).get("trend_off_count", 0)),
-        )
-
-        # 2.5) HARD NO-TRADE ZONE: TRANSITION => stop immediately
-        if str(sel.get("adaptive_regime", "")).upper() == "TRANSITION":
-            LOG.info("DEBUG_SKIP | transition_phase_guard")
-            return
-
-        # 3) Engine uses effective config only (SIDEWAY or TREND only at this point)
-        from engine import TradingEngine
-
-        eng = TradingEngine(eff_path)
-        pkg = eng.generate_signal_package()
-        ctx = pkg.get("context", {}) if isinstance(pkg.get("context", {}), dict) else {}
-
-        direction = str(pkg.get("direction", "NONE")).upper()
-        blocked_by = ctx.get("blocked_by")
-
-        if direction not in ("BUY", "SELL"):
-            LOG.info("DEBUG_SKIP | no_candidate_direction=%s | blocked_by=%s", direction, blocked_by)
-            return
-        if blocked_by not in (None, "", "None"):
-            LOG.info("DEBUG_SKIP | blocked_by=%s", blocked_by)
-            return
-
-        entry = pkg.get("entry_candidate")
-        sl = pkg.get("stop_candidate")
-        tp = pkg.get("tp_candidate")
-        if entry is None or sl is None or tp is None:
-            LOG.info("DEBUG_SKIP | engine_missing_fields entry/sl/tp=%s/%s/%s", entry, sl, tp)
-            return
-
-        entry_f = float(entry)
-        sl_f = float(sl)
-        tp_f = float(tp)
-        min_rr = float(ctx.get("min_rr", cfg_eff.get("min_rr", 1.5)))
-
-        ok_levels, reason_levels = _validate_stop_levels(symbol, sl_f, tp_f, entry_f, direction)
-        if not ok_levels:
-            LOG.info("DEBUG_SKIP | stop_level_block %s", reason_levels)
-            return
-
-        # 4) RiskGuard PRE-EXEC
-        rg_cfg = _build_risk_guard_config(cfg_eff)
-        rg = RiskGuard(rg_cfg)
-
-        market = _market_snapshot(symbol, atr=ctx.get("atr"))
-        account = _account_snapshot(symbol)
-
         try:
-            perf = _performance_snapshot_today_via_deals_get()
-        except Exception as e:
-            LOG.info("RISK_BLOCK | action=BLOCK_HARD | reasons=history_unavailable err=%s", str(e))
-            return
+            sig = inspect.signature(fn)
+            params = [p for p in sig.parameters.values()
+                      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+            argc = len(params)  # bound method already binds self
+        except Exception:
+            argc = -1
 
-        plan = TradePlan(
-            symbol=symbol,
-            direction=direction,
-            entry=entry_f,
-            sl=sl_f,
-            tp=tp_f,
-            min_rr=min_rr,
-            created_utc=now,
-        )
+        tries: List[Tuple[Tuple[Any, ...], str]] = []
+        if argc == 0:
+            tries = [((), "0args")]
+        elif argc == 1:
+            tries = [((symbol,), "1arg_symbol")]
+        elif argc >= 2:
+            tries = [((symbol, cfg), "2args_symbol_cfg"), ((symbol,), "1arg_symbol"), ((), "0args")]
+        else:
+            tries = [((symbol, cfg), "2args_symbol_cfg"), ((symbol,), "1arg_symbol"), ((), "0args")]
 
-        rg_dec = rg.evaluate_pre_exec(
-            plan,
-            market,
-            account,
-            perf,
-            now_utc=now,
-            last_exec_utc=_LAST_EXEC_UTC,
-            sent_fingerprints=_SENT_FINGERPRINTS,
-        )
+        last_err = ""
+        for args, tag in tries:
+            try:
+                out = fn(*args)
+                d = _to_dict_any(out)
+                return True, d, tag
+            except TypeError as te:
+                last_err = f"TypeError:{te}"
+                continue
+            except Exception as e:
+                return False, None, f"{tag}:{type(e).__name__}:{e}"
 
-        if rg_dec.action != GuardAction.ALLOW:
-            LOG.info(
-                "RISK_BLOCK | action=%s | fingerprint=%s | reasons=%s | perf_today=%.2f loss_streak=%d",
-                rg_dec.action.value,
-                rg_dec.fingerprint,
-                [(r.code, r.message, r.data) for r in rg_dec.reasons],
-                perf.realized_pl_today,
-                perf.consecutive_losses,
-            )
-            return
+        return False, None, last_err or "no_compatible_signature"
+    except Exception as e:
+        return False, None, f"invoke_failed:{type(e).__name__}:{e}"
 
-        if rg_dec.fingerprint:
-            _SENT_FINGERPRINTS[rg_dec.fingerprint] = now
 
-        # 5) AI confirm + execute (SIDEWAY/TREND only)
-        engine_order = {
-            "direction": direction,
-            "entry": entry_f,
-            "sl": sl_f,
-            "tp": tp_f,
-            "lot": float(lot),
-            "mode": mode_eff,
-            "atr": ctx.get("atr"),
+def call_engine_autodiscovery(config_path: str, cfg: Dict[str, Any], symbol: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    dbg: Dict[str, Any] = {
+        "ok": False,
+        "engine_ctor": None,
+        "picked_method": None,
+        "picked_call": None,
+        "candidates": [],
+        "errors": []
+    }
+
+    try:
+        from engine import TradingEngine  # type: ignore
+    except Exception as ex:
+        dbg["errors"].append(f"import_engine_failed:{type(ex).__name__}:{ex}")
+        return None, dbg
+
+    engine_instances: List[Tuple[str, Any]] = []
+    try:
+        engine_instances.append(("TradingEngine(config_path)", TradingEngine(config_path)))
+    except Exception as ex:
+        dbg["errors"].append(f"ctor_path_failed:{type(ex).__name__}:{ex}")
+
+    # NOTE: engine expects path; dict constructor might fail (we record this for evidence)
+    try:
+        if isinstance(cfg, dict) and cfg:
+            engine_instances.append(("TradingEngine(config_dict)", TradingEngine(cfg)))
+    except Exception as ex:
+        dbg["errors"].append(f"ctor_dict_failed:{type(ex).__name__}:{ex}")
+
+    if not engine_instances:
+        return None, dbg
+
+    # Prefer the known-good method name observed in runtime
+    preferred = ["generate_signal_package"]
+
+    # Broader fallback patterns (kept small; we already know the real one)
+    patterns = ["signal", "package", "eval", "run", "analy", "build"]
+
+    def score_name(n: str) -> int:
+        nlow = n.lower()
+        score = 0
+        for i, pn in enumerate(preferred):
+            if nlow == pn.lower():
+                score += 200 - i
+        for p in patterns:
+            if p in nlow:
+                score += 10
+        if nlow.startswith("_"):
+            score -= 50
+        return score
+
+    for ctor_name, eng in engine_instances:
+        names = [n for n in dir(eng) if not n.startswith("__")]
+        scored = sorted([(score_name(n), n) for n in names], reverse=True)
+        top = [n for s, n in scored if s > 0][:25]
+
+        dbg["engine_ctor"] = ctor_name
+        dbg["candidates"] = top
+
+        for name in top:
+            ok, d, call_tag = _call_method_safely(eng, name, symbol=symbol, cfg=cfg)
+            if ok and isinstance(d, dict):
+                dbg["ok"] = True
+                dbg["picked_method"] = name
+                dbg["picked_call"] = call_tag
+                return d, dbg
+            else:
+                if call_tag and len(dbg["errors"]) < 12:
+                    dbg["errors"].append(f"{name}:{call_tag}")
+
+    return None, dbg
+
+
+# -----------------------------------------------------------------------------
+# Schema-aligned extraction for generate_signal_package()
+# -----------------------------------------------------------------------------
+
+def extract_from_signal_package(pkg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Align to observed schema:
+    TOP_KEYS:
+      symbol, direction, entry_candidate, stop_candidate, tp_candidate, rr, score, confidence_py,
+      bos, supertrend_ok, context{blocked_by, HTF_trend, MTF_trend, LTF_trend, mode, ... , gates{...}, atr, ...}
+    """
+    ctx = pkg.get("context", {})
+    if not isinstance(ctx, dict):
+        ctx = {}
+
+    blocked_by_list = normalize_blocked_by(ctx.get("blocked_by"))
+
+    # Core decision semantics
+    direction = pkg.get("direction", None)  # e.g. BUY/SELL/NONE
+    decision = direction
+
+    # Plan candidates
+    entry = pkg.get("entry_candidate", None)
+    sl = pkg.get("stop_candidate", None)
+    tp = pkg.get("tp_candidate", None)
+    rr = safe_float(pkg.get("rr", None), 0.0) or 0.0
+
+    # Confidence
+    score = safe_float(pkg.get("score", None), 0.0) or 0.0
+    confidence_py = safe_int(pkg.get("confidence_py", None), 0) or 0
+
+    # Structure trends (already present as strings)
+    htf_trend = ctx.get("HTF_trend", None)
+    mtf_trend = ctx.get("MTF_trend", None)
+    ltf_trend = ctx.get("LTF_trend", None)
+
+    # Supertrend evidence
+    supertrend_dir = ctx.get("supertrend_dir", None)
+    supertrend_value = safe_float(ctx.get("supertrend_value", None), None)
+    supertrend_ok = pkg.get("supertrend_ok", None)
+
+    # Vol/Trend metrics in context
+    atr = safe_float(ctx.get("atr", None), None)
+    atr_period = safe_int(ctx.get("atr_period", None), None)
+    atr_sl_mult = safe_float(ctx.get("atr_sl_mult", None), None)
+    min_rr = safe_float(ctx.get("min_rr", None), None)
+
+    # Gates dictionary
+    gates = ctx.get("gates", None)
+    if not isinstance(gates, dict):
+        gates = {}
+
+    # context.metrics (newer engines may provide this)
+    ctx_metrics = ctx.get("metrics", None)
+    if not isinstance(ctx_metrics, dict):
+        ctx_metrics = {}
+
+    obs = {
+        "engine_version": ctx.get("engine_version", None),
+        "mode": ctx.get("mode", None),
+        "bias_source": ctx.get("bias_source", None),
+        "direction_bias": ctx.get("direction_bias", None),
+        "watch_state": ctx.get("watch_state", None),
+
+        "structure": {
+            "htf_trend": htf_trend,
+            "mtf_trend": mtf_trend,
+            "ltf_trend": ltf_trend,
+        },
+        "metrics": {
+            # Base metrics (backward compatible)
+            "atr": atr,
+            "atr_period": atr_period,
+            "supertrend_dir": supertrend_dir,
+            "supertrend_value": supertrend_value,
+
+            # Forward-compatible visibility (pass-through from engine.context.metrics when present)
+            # NOTE: We keep a bounded whitelist to avoid dumping huge objects.
+            "event_timeframe": ctx_metrics.get("event_timeframe", None),
+            "bb_width_points": ctx_metrics.get("bb_width_points", None),
+            "bb_width_atr": ctx_metrics.get("bb_width_atr", None),
+            "bb_width_atr_min": ctx_metrics.get("bb_width_atr_min", None),
+            "vol_expansion_score": ctx_metrics.get("vol_expansion_score", None),
+            "vol_expansion_threshold": ctx_metrics.get("vol_expansion_threshold", None),
+            "vol_expansion_margin": ctx_metrics.get("vol_expansion_margin", None),
+
+            "adx": ctx_metrics.get("adx_value", None),
+            "plus_di": ctx_metrics.get("plus_di", None),
+            "minus_di": ctx_metrics.get("minus_di", None),
+
+            "supertrend_conflict": ctx_metrics.get("supertrend_conflict", None),
+            "supertrend_distance_points": ctx_metrics.get("supertrend_distance_points", None),
+            "supertrend_distance_atr": ctx_metrics.get("supertrend_distance_atr", None),
+        },
+        "thresholds": {
+            "atr_sl_mult": atr_sl_mult,
+            "min_rr": min_rr,
+        },
+        "gates": {
+            "blocked_by": blocked_by_list,
+            "supertrend_ok": supertrend_ok,
+            "supertrend_conflict": ctx_metrics.get("supertrend_conflict", None),
+            # expand booleans if present
+            "bias_ok": gates.get("bias_ok", None),
+            "vol_expansion_ok": gates.get("vol_expansion_ok", None),
+            "bos_ok": gates.get("bos_ok", None),
+            "bos_break_ok": gates.get("bos_break_ok", None),
+            "retest_checked": gates.get("retest_checked", None),
+            "retest_ok": gates.get("retest_ok", None),
+            "retest_bypass_reason": gates.get("retest_bypass_reason", None),
+            "proximity_checked": gates.get("proximity_checked", None),
+            "proximity_ok": gates.get("proximity_ok", None),
+            "proximity_bypass_reason": gates.get("proximity_bypass_reason", None),
+            "rr_ok": gates.get("rr_ok", None),
         }
+    }
 
-        ai_decision, ai_payload = confirm_via_api(
-            api_url=api_url,
-            timeout_sec=timeout_sec,
-            engine_order=engine_order,
-        )
+    return {
+        "decision": decision,
+        "blocked_by": blocked_by_list,
+        "confidence": score,            # canonical float score
+        "confidence_py": confidence_py, # raw int evidence
+        "plan": {"entry": entry, "sl": sl, "tp": tp, "rr": rr},
+        "obs": obs,
+    }
 
-        if not ai_decision.final_confirm:
-            LOG.info("DEBUG_SKIP | ai_reject_or_validator_reject | hint=%s | ai_payload=%s", ai_decision.mentor_hint, ai_payload)
-            return
 
-        if not live_eff:
-            LOG.info(
-                "DRY_RUN_ORDER | side=%s lot=%.2f entry=%.2f sl=%.2f tp=%.2f | conf=%.1f | note=%s",
-                ai_decision.side,
-                lot,
-                ai_decision.entry,
-                ai_decision.sl,
-                ai_decision.tp,
-                ai_decision.confidence,
-                ai_decision.mentor_hint,
-            )
-            return
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 
-        sent, msg = _send_market_order(symbol, ai_decision.side, lot, ai_decision.sl, ai_decision.tp, deviation)
-        if not sent:
-            LOG.error("ORDER_FAIL | %s", msg)
-            return
+def main() -> int:
+    t0 = time.time()
 
-        _LAST_EXEC_UTC = _now_utc()
-        LOG.info("ORDER_OK | %s", msg)
+    config_path = os.environ.get("HIM_CONFIG", "config.json")
+    cfg = load_json(config_path, {})
+    if not isinstance(cfg, dict):
+        cfg = {}
 
-    finally:
-        mt5.shutdown()
+    symbol_cfg = str(cfg.get("symbol", "GOLD"))
+    live = bool(cfg_get(cfg, ["execution", "enable_execution"], cfg.get("enable_execution", False)))
+    lot = safe_float(cfg_get(cfg, ["risk", "lot"], cfg.get("lot", None)), None)
+
+    pkg, engine_dbg = call_engine_autodiscovery(config_path, cfg, symbol_cfg)
+
+    if not isinstance(pkg, dict):
+        payload = {
+            "ts": utc_iso_now(),
+            "type": "MENTOR_EXECUTOR",
+            "version": "v2.13.3",
+            "ok": False,
+            "symbol": symbol_cfg,
+            "live": live,
+            "lot": lot,
+            "elapsed_ms": int((time.time() - t0) * 1000),
+            "error": "ENGINE_CALL_FAILED",
+            "engine_dbg": engine_dbg,
+        }
+        print(json_dumps_compact(payload))
+        return 2
+
+    # Extract (schema-aligned)
+    ex = extract_from_signal_package(pkg)
+
+    payload = {
+        "ts": utc_iso_now(),
+        "type": "MENTOR_EXECUTOR",
+        "version": "v2.13.3",
+        "ok": True,
+        "symbol": str(pkg.get("symbol", symbol_cfg)),
+        "live": live,
+        "lot": lot,
+        "elapsed_ms": int((time.time() - t0) * 1000),
+
+        "decision": ex["decision"],
+        "blocked_by": ex["blocked_by"],
+        "confidence": ex["confidence"],
+        "confidence_py": ex["confidence_py"],
+        "plan": ex["plan"],
+        "obs": ex["obs"],
+
+        # Debug (short + useful)
+        "engine_dbg": engine_dbg,
+    }
+
+    print(json_dumps_compact(payload))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        payload = {
+            "ts": utc_iso_now(),
+            "type": "MENTOR_EXECUTOR",
+            "version": "v2.13.3",
+            "ok": False,
+            "error": f"UNCAUGHT:{type(e).__name__}:{e}",
+            "trace": traceback.format_exc(limit=3),
+        }
+        print(json_dumps_compact(payload))
+        raise SystemExit(2)

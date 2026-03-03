@@ -12,3 +12,7 @@ trade_history.json
 performance_stats.json
 dashboard.log
 him_system.log
+logs/
+.state/
+__pycache__/
+*.pyc

@@ -43,7 +43,10 @@
   },
   "commissioning": {
     "enabled": true,
-    "log_path": "logs/commissioning.jsonl"
+  "poll_sec": 1.0,
+  "event_timeframes": ["M1"],
+  "events_log_path": "logs/commissioning_events.jsonl",
+  "state_path": ".commission_event_state.json"
   },
   "continuation": {
     "enabled": false,
