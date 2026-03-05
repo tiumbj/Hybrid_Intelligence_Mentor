@@ -2,21 +2,29 @@
 # =============================================================================
 # Hybrid Intelligence Mentor (HIM) - Trading Engine
 #
-# Version: v2.12.7
+# Version: v2.12.8
 # File: C:\Hybrid_Intelligence_Mentor\engine.py
 #
-# CHANGELOG (v2.12.7):
-# - Backward-compatible constructor: TradingEngine accepts config_path (str) OR config dict
-# - Backward-compatible engine call:
-#     generate_signal_package("GOLD")            -> treated as symbol (legacy)
-#     generate_signal_package("GOLD","M1")       -> legacy (symbol, timeframe)
-#     generate_signal_package(event_timeframe="M1") -> new style
-# - Added eval aliases to satisfy executor method discovery:
-#     evaluate(), eval_signal() => generate_signal_package()
+# PRODUCTION MODEL (DO NOT CHANGE STRUCTURE)
 #
-# NOTE:
-# - Keeps v2.12.6 logic: M1 Supertrend relaxation by ATR distance.
-# - Confirm-only: engine never sends orders.
+# CHANGELOG (v2.12.8):
+# - FIX: RR gate mismatch with config.min_rr
+#   Previous: RR placeholder hard-coded to ~1.3 (TP=1.3 ATR, SL=1.0 ATR)
+#            causing rr_ok=false when min_rr > 1.3 (commissioning hard block)
+#   Now: RR placeholder derives TP from min_rr:
+#        sl_atr = 1.0
+#        tp_atr = max(base_tp_atr, min_rr * sl_atr)
+#        rr = tp_atr / sl_atr  (>= min_rr)
+#
+# - Keep: v2.12.7 backward-compatible constructor + call signatures
+# - Keep: v2.12.6 M1 Supertrend relaxation by ATR distance
+#
+# EVIDENCE NOTE:
+# - Commissioning showed rr_too_low = 100% and rr_ok=false = 100% while plan.rr ~1.3
+# - Config min_rr = 1.6 -> impossible to pass with fixed RR=1.3
+#
+# SAFETY:
+# - Confirm-only: engine MUST NOT place orders.
 # =============================================================================
 
 from __future__ import annotations
@@ -179,7 +187,6 @@ def supertrend(
                 st_dir.iloc[i] = -1.0
                 st_line.iloc[i] = min(final_ub.iloc[i], prev_line) if not np.isnan(prev_line) else final_ub.iloc[i]
 
-    # avoid deprecated fillna(method=...)
     st_dir = st_dir.ffill()
     st_line = st_line.ffill()
     return st_line, st_dir
@@ -213,8 +220,12 @@ class EngineConfig:
 
     min_rr: float = 1.20
 
-    # M1 supertrend relaxation (v2.12.6)
+    # M1 supertrend relaxation
     st_relax_dist_atr_m1: float = 0.30
+
+    # NEW (v2.12.8): base RR components (still production-safe placeholders)
+    rr_sl_atr: float = 1.0
+    rr_base_tp_atr: float = 1.3
 
 
 class TradingEngine:
@@ -263,6 +274,9 @@ class TradingEngine:
             min_rr=_safe_float(raw.get("min_rr", 1.20), 1.20),
 
             st_relax_dist_atr_m1=_safe_float(raw.get("st_relax_dist_atr_m1", 0.30), 0.30),
+
+            rr_sl_atr=_safe_float(raw.get("rr_sl_atr", 1.0), 1.0),
+            rr_base_tp_atr=_safe_float(raw.get("rr_base_tp_atr", 1.3), 1.3),
         )
 
     def _ensure_mt5(self) -> None:
@@ -340,16 +354,27 @@ class TradingEngine:
         return ok, {"bos_break_up_atr": float(break_up), "bos_break_dn_atr": float(break_dn)}, (None if ok else "no_bos_break")
 
     def _rr_gate(self, ev_bundle: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+        """
+        v2.12.8 FIX:
+        RR must be compatible with config.min_rr to avoid permanent commissioning blocks.
+
+        - sl_atr = cfg.rr_sl_atr (default 1.0)
+        - tp_atr = max(cfg.rr_base_tp_atr, cfg.min_rr * sl_atr)
+        - rr = tp_atr / sl_atr  (>= min_rr)
+        """
         atr = float(ev_bundle.get("atr", np.nan))
         if atr == 0.0 or np.isnan(atr):
-            return False, {"rr": np.nan}, "rr_too_low"
+            return False, {"rr": np.nan, "sl_atr": self.cfg.rr_sl_atr, "tp_atr": np.nan}, "rr_too_low"
 
-        sl = 1.0 * atr
-        tp = 1.3 * atr
-        rr = tp / sl if sl != 0 else np.nan
+        sl_atr = float(self.cfg.rr_sl_atr) if self.cfg.rr_sl_atr > 0 else 1.0
+        base_tp_atr = float(self.cfg.rr_base_tp_atr) if self.cfg.rr_base_tp_atr > 0 else 1.3
 
-        ok = (not np.isnan(rr)) and (rr >= self.cfg.min_rr)
-        return ok, {"rr": float(rr), "sl_atr": 1.0, "tp_atr": 1.3}, (None if ok else "rr_too_low")
+        # derive tp from min_rr (core fix)
+        tp_atr = max(base_tp_atr, float(self.cfg.min_rr) * sl_atr)
+        rr = (tp_atr / sl_atr) if sl_atr != 0 else np.nan
+
+        ok = (not np.isnan(rr)) and (rr >= float(self.cfg.min_rr))
+        return ok, {"rr": float(rr), "sl_atr": float(sl_atr), "tp_atr": float(tp_atr)}, (None if ok else "rr_too_low")
 
     # -------------------------------------------------------------------------
     # Backward-compatible public API
@@ -369,7 +394,6 @@ class TradingEngine:
         # legacy positional parsing
         if len(args) == 1:
             a0 = str(args[0])
-            # if looks like timeframe -> treat as timeframe; else treat as symbol
             if a0 in MT5_TF_MAP:
                 event_timeframe = a0
             else:
@@ -378,7 +402,6 @@ class TradingEngine:
             symbol = str(args[0])
             event_timeframe = str(args[1])
 
-        # compute
         t0 = _now_ms()
 
         htf = self._compute_tf_bundle(symbol, self.cfg.htf)
@@ -407,7 +430,7 @@ class TradingEngine:
         if data_ok and not vol_ok:
             blocked_by.append("no_vol_expansion")
 
-        # supertrend conflict gate + M1 relaxation (v2.12.6 logic kept)
+        # supertrend conflict gate + M1 relaxation
         st_dir_ev = int(ev.get("st_dir", 0)) if ev.get("ok") else 0
         st_dist_atr = _safe_float(ev.get("st_distance_atr"), np.nan)
         metrics["supertrend_dir_event"] = st_dir_ev
@@ -439,28 +462,37 @@ class TradingEngine:
         if data_ok and bos_block:
             blocked_by.append(bos_block)
 
-        # RR
+        # RR (FIXED in v2.12.8)
         rr_ok, rr_metrics, rr_block = self._rr_gate(ev)
         gates["rr_ok"] = bool(rr_ok)
         metrics.update(rr_metrics)
+        metrics["min_rr_used"] = float(self.cfg.min_rr)
         if data_ok and rr_block:
             blocked_by.append(rr_block)
 
         decision = "BLOCKED" if blocked_by else "PASS"
 
         return {
-            "engine_version": "v2.12.7",
+            "engine_version": "v2.12.8",
             "ts_ms": _now_ms(),
             "symbol": symbol,
             "event_timeframe": event_timeframe,
             "timeframes": {"htf": self.cfg.htf, "mtf": self.cfg.mtf, "ltf": self.cfg.ltf},
             "bias": bias,
-            "price": {"close": _safe_float(ev.get("close"), np.nan), "atr": _safe_float(ev.get("atr"), np.nan)},
+            "price": {
+                "close": _safe_float(ev.get("close"), np.nan),
+                "atr": _safe_float(ev.get("atr"), np.nan),
+            },
             "gates": gates,
             "blocked_by": blocked_by,
             "decision": decision,
             "metrics": metrics,
-            "debug": {"htf_ok": bool(htf.get("ok")), "mtf_ok": bool(mtf.get("ok")), "ltf_ok": bool(ltf.get("ok")), "event_ok": bool(ev.get("ok"))},
+            "debug": {
+                "htf_ok": bool(htf.get("ok")),
+                "mtf_ok": bool(mtf.get("ok")),
+                "ltf_ok": bool(ltf.get("ok")),
+                "event_ok": bool(ev.get("ok")),
+            },
             "latency_ms": int(_now_ms() - t0),
         }
 

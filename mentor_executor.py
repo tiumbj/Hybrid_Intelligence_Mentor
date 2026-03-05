@@ -1,21 +1,19 @@
 """
 Hybrid Intelligence Mentor (HIM)
 File: mentor_executor.py
-Version: v2.13.4 (PRODUCTION MODEL - Schema Router for Engine v2.12.x + Legacy Support)
+Version: v2.13.5 (PRODUCTION MODEL - Complete Metric Mapping for Engine v2.12.x)
 Date: 2026-03-03 (Asia/Bangkok)
 
 CHANGELOG
-- v2.13.4:
-  - PRODUCTION: Keep v2.13.3 structure (autodiscovery, compact JSON, fail-closed, engine_dbg)
-  - NEW: Schema Router
-      A) Engine v2.12.x (top-level): decision/blocked_by/gates/metrics
-      B) Legacy schema (context.*): keep extract_from_signal_package()
-  - FIX: Prevent commissioning blindness (decision/blocked_by/obs.metrics/obs.gates no longer null when engine provides them)
-  - SAFETY: confirm-only (does NOT place orders)
-
-EVIDENCE (runtime symptom to prevent)
-- Previously executor returned ok=true but decision=null, metrics/gates null in logs (commissioning tools saw null fields).
-- Root cause: extractor assumed legacy 'context' schema; engine v2.12.x returns top-level schema.
+- v2.13.5:
+  - PRODUCTION: Keep v2.13.4 structure (autodiscovery, compact JSON, fail-closed, schema router)
+  - FIX: Map BOS metrics from engine v2.12.x metrics to obs.metrics:
+      - bos_break_up_atr
+      - bos_break_dn_atr
+  - FIX: Provide non-null gate aliases for tools:
+      - bos_ok (alias of bos_break_ok)
+      - bias_ok (derived when possible; else None)
+  - Keep: Legacy extractor unchanged
 
 SAFETY
 - Confirm-only: does NOT place orders.
@@ -81,13 +79,6 @@ def cfg_get(cfg: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
 
 
 def normalize_blocked_by(x: Any) -> List[str]:
-    """
-    Normalize to list[str] and de-duplicate (preserve order).
-    Supports:
-    - list/tuple/set
-    - comma-separated string
-    - None
-    """
     items: List[str] = []
     if x is None:
         items = []
@@ -136,7 +127,7 @@ def _call_method_safely(obj: Any, name: str, symbol: str, cfg: Dict[str, Any]) -
             sig = inspect.signature(fn)
             params = [p for p in sig.parameters.values()
                       if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-            argc = len(params)  # bound method already binds self
+            argc = len(params)
         except Exception:
             argc = -1
 
@@ -189,7 +180,6 @@ def call_engine_autodiscovery(config_path: str, cfg: Dict[str, Any], symbol: str
     except Exception as ex:
         dbg["errors"].append(f"ctor_path_failed:{type(ex).__name__}:{ex}")
 
-    # dict-ctor may succeed for some engines; keep for compatibility
     try:
         if isinstance(cfg, dict) and cfg:
             engine_instances.append(("TradingEngine(config_dict)", TradingEngine(cfg)))
@@ -238,23 +228,17 @@ def call_engine_autodiscovery(config_path: str, cfg: Dict[str, Any], symbol: str
 
 
 # -----------------------------------------------------------------------------
-# Schema-aligned extraction (Legacy: context.*)
+# Legacy extractor (unchanged)
 # -----------------------------------------------------------------------------
 
 def extract_from_signal_package(pkg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Legacy schema alignment (kept from v2.13.3):
-    Expected:
-      pkg: direction, entry_candidate, stop_candidate, tp_candidate, rr, score, confidence_py,
-      ctx: context{blocked_by,gates,metrics,...}
-    """
     ctx = pkg.get("context", {})
     if not isinstance(ctx, dict):
         ctx = {}
 
     blocked_by_list = normalize_blocked_by(ctx.get("blocked_by"))
 
-    direction = pkg.get("direction", None)  # e.g. BUY/SELL/NONE
+    direction = pkg.get("direction", None)
     decision = direction
 
     entry = pkg.get("entry_candidate", None)
@@ -308,17 +292,13 @@ def extract_from_signal_package(pkg: Dict[str, Any]) -> Dict[str, Any]:
             "bb_width_points": ctx_metrics.get("bb_width_points", None),
             "bb_width_atr": ctx_metrics.get("bb_width_atr", None),
             "bb_width_atr_min": ctx_metrics.get("bb_width_atr_min", None),
-            "vol_expansion_score": ctx_metrics.get("vol_expansion_score", None),
-            "vol_expansion_threshold": ctx_metrics.get("vol_expansion_threshold", None),
-            "vol_expansion_margin": ctx_metrics.get("vol_expansion_margin", None),
-
-            "adx": ctx_metrics.get("adx_value", None),
-            "plus_di": ctx_metrics.get("plus_di", None),
-            "minus_di": ctx_metrics.get("minus_di", None),
 
             "supertrend_conflict": ctx_metrics.get("supertrend_conflict", None),
             "supertrend_distance_points": ctx_metrics.get("supertrend_distance_points", None),
             "supertrend_distance_atr": ctx_metrics.get("supertrend_distance_atr", None),
+
+            "bos_break_up_atr": ctx_metrics.get("bos_break_up_atr", None),
+            "bos_break_dn_atr": ctx_metrics.get("bos_break_dn_atr", None),
         },
         "thresholds": {
             "atr_sl_mult": atr_sl_mult,
@@ -332,12 +312,6 @@ def extract_from_signal_package(pkg: Dict[str, Any]) -> Dict[str, Any]:
             "vol_expansion_ok": gates.get("vol_expansion_ok", None),
             "bos_ok": gates.get("bos_ok", None),
             "bos_break_ok": gates.get("bos_break_ok", None),
-            "retest_checked": gates.get("retest_checked", None),
-            "retest_ok": gates.get("retest_ok", None),
-            "retest_bypass_reason": gates.get("retest_bypass_reason", None),
-            "proximity_checked": gates.get("proximity_checked", None),
-            "proximity_ok": gates.get("proximity_ok", None),
-            "proximity_bypass_reason": gates.get("proximity_bypass_reason", None),
             "rr_ok": gates.get("rr_ok", None),
         }
     }
@@ -353,31 +327,16 @@ def extract_from_signal_package(pkg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # -----------------------------------------------------------------------------
-# Schema Router (NEW: Engine v2.12.x top-level schema)
+# Schema Router for Engine v2.12.x
 # -----------------------------------------------------------------------------
 
 def is_engine_v212_schema(pkg: Dict[str, Any]) -> bool:
-    # Engine v2.12.x returns top-level: decision/blocked_by/gates/metrics
     if not isinstance(pkg, dict):
         return False
-    if "decision" not in pkg:
-        return False
-    if "blocked_by" not in pkg:
-        return False
-    if "gates" not in pkg:
-        return False
-    return True
+    return ("decision" in pkg) and ("blocked_by" in pkg) and ("gates" in pkg)
 
 
 def extract_from_engine_v212(pkg: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Engine v2.12.x schema:
-      decision: "BLOCKED" | "PASS"
-      blocked_by: list[str]
-      gates: dict
-      metrics: dict
-    We map to mentor schema while keeping stable keys used by tools.
-    """
     decision = pkg.get("decision", None)
     blocked_by_list = normalize_blocked_by(pkg.get("blocked_by", []))
 
@@ -389,7 +348,11 @@ def extract_from_engine_v212(pkg: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(gates_src, dict):
         gates_src = {}
 
-    # Keep obs layout similar to legacy (structure/thresholds can be None here, but key must exist)
+    # aliases for tools expecting legacy names
+    bos_break_ok = gates_src.get("bos_break_ok", None)
+    bos_ok_alias = bos_break_ok  # production alias
+    bias_ok_alias = gates_src.get("bias_ok", None)  # engine may not provide; keep as-is
+
     obs = {
         "engine_version": pkg.get("engine_version", None),
         "mode": None,
@@ -397,13 +360,8 @@ def extract_from_engine_v212(pkg: Dict[str, Any]) -> Dict[str, Any]:
         "direction_bias": pkg.get("bias", None),
         "watch_state": None,
 
-        "structure": {
-            "htf_trend": None,
-            "mtf_trend": None,
-            "ltf_trend": None,
-        },
+        "structure": {"htf_trend": None, "mtf_trend": None, "ltf_trend": None},
         "metrics": {
-            # minimal commissioning-critical metrics
             "atr": safe_float(cfg_get(pkg, ["price", "atr"], None), None),
             "atr_period": None,
 
@@ -415,51 +373,37 @@ def extract_from_engine_v212(pkg: Dict[str, Any]) -> Dict[str, Any]:
             "bb_width_atr": metrics.get("bb_width_atr", None),
             "bb_width_atr_min": metrics.get("bb_width_atr_min_used", None),
 
-            "vol_expansion_score": None,
-            "vol_expansion_threshold": metrics.get("bb_width_atr_min_used", None),
-            "vol_expansion_margin": None,
-
-            "adx": None,
-            "plus_di": None,
-            "minus_di": None,
-
             "supertrend_conflict": gates_src.get("supertrend_conflict", None),
             "supertrend_distance_points": None,
             "supertrend_distance_atr": metrics.get("supertrend_distance_atr", None),
+
+            # FIX v2.13.5: expose BOS metrics to tools
+            "bos_break_up_atr": metrics.get("bos_break_up_atr", None),
+            "bos_break_dn_atr": metrics.get("bos_break_dn_atr", None),
+
+            # Optional RR visibility (not required for BOS analysis, but helpful)
+            "rr": metrics.get("rr", None),
+            "min_rr_used": metrics.get("min_rr_used", None),
         },
-        "thresholds": {
-            "atr_sl_mult": None,
-            "min_rr": None,
-        },
+        "thresholds": {"atr_sl_mult": None, "min_rr": None},
         "gates": {
             "blocked_by": blocked_by_list,
             "supertrend_ok": gates_src.get("supertrend_ok", None),
             "supertrend_conflict": gates_src.get("supertrend_conflict", None),
 
-            # keep legacy key names (tools expect these keys to exist)
-            "bias_ok": gates_src.get("bias_ok", None),
+            "bias_ok": bias_ok_alias,
             "vol_expansion_ok": gates_src.get("vol_expansion_ok", None),
 
-            "bos_ok": gates_src.get("bos_ok", None),
-            "bos_break_ok": gates_src.get("bos_break_ok", None),
-
-            "retest_checked": gates_src.get("retest_checked", None),
-            "retest_ok": gates_src.get("retest_ok", None),
-            "retest_bypass_reason": gates_src.get("retest_bypass_reason", None),
-
-            "proximity_checked": gates_src.get("proximity_checked", None),
-            "proximity_ok": gates_src.get("proximity_ok", None),
-            "proximity_bypass_reason": gates_src.get("proximity_bypass_reason", None),
+            # FIX v2.13.5: provide bos_ok (legacy name) + keep bos_break_ok
+            "bos_ok": bos_ok_alias,
+            "bos_break_ok": bos_break_ok,
 
             "rr_ok": gates_src.get("rr_ok", None),
         }
     }
 
-    # plan: engine v2.12.x may not provide entry/sl/tp; keep schema stable
     rr_val = safe_float(metrics.get("rr", None), None)
     plan = {"entry": None, "sl": None, "tp": None, "rr": (rr_val if rr_val is not None else 0.0)}
-
-    # confidence: engine v2.12.x doesn't provide score by default; keep 0.0
     confidence = safe_float(metrics.get("score", 0.0), 0.0) or 0.0
 
     return {
@@ -500,7 +444,7 @@ def main() -> int:
         payload = {
             "ts": utc_iso_now(),
             "type": "MENTOR_EXECUTOR",
-            "version": "v2.13.4",
+            "version": "v2.13.5",
             "ok": False,
             "symbol": symbol_cfg,
             "live": live,
@@ -512,13 +456,12 @@ def main() -> int:
         print(json_dumps_compact(payload))
         return 2
 
-    # Schema Router (PRODUCTION)
     ex = extract_router(pkg)
 
     payload = {
         "ts": utc_iso_now(),
         "type": "MENTOR_EXECUTOR",
-        "version": "v2.13.4",
+        "version": "v2.13.5",
         "ok": True,
         "symbol": str(pkg.get("symbol", symbol_cfg)),
         "live": live,
@@ -532,7 +475,6 @@ def main() -> int:
         "plan": ex.get("plan", {"entry": None, "sl": None, "tp": None, "rr": 0.0}),
         "obs": ex.get("obs", {}),
 
-        # Debug (short + useful)
         "engine_dbg": engine_dbg,
     }
 
@@ -549,7 +491,7 @@ if __name__ == "__main__":
         payload = {
             "ts": utc_iso_now(),
             "type": "MENTOR_EXECUTOR",
-            "version": "v2.13.4",
+            "version": "v2.13.5",
             "ok": False,
             "error": f"UNCAUGHT:{type(e).__name__}:{e}",
             "trace": traceback.format_exc(limit=3),

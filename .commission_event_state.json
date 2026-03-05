@@ -1,9 +1,9 @@
 {
   "last_bar_time": {
     "M5": 1772440200,
-    "M1": 1772510100
+    "M1": 1772693280
   },
-  "last_signature": null,
-  "ts": "2026-03-03T01:54:59+00:00",
+  "last_signature": "ce60296a90cda5d96c041c7dc6b1bc175d85d3ca",
+  "ts": "2026-03-05T04:48:10+00:00",
   "version": "v2.12.6"
 }
