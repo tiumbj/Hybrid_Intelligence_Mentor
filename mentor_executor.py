@@ -1,500 +1,336 @@
 """
-Hybrid Intelligence Mentor (HIM)
-File: mentor_executor.py
-Version: v2.13.5 (PRODUCTION MODEL - Complete Metric Mapping for Engine v2.12.x)
-Date: 2026-03-03 (Asia/Bangkok)
+mentor_executor.py
+Version: v1.0.0
+Purpose: Production Orchestrator for HIM
+         Signal Source -> AI Final Confirm -> MT5 Executor
 
-CHANGELOG
-- v2.13.5:
-  - PRODUCTION: Keep v2.13.4 structure (autodiscovery, compact JSON, fail-closed, schema router)
-  - FIX: Map BOS metrics from engine v2.12.x metrics to obs.metrics:
-      - bos_break_up_atr
-      - bos_break_dn_atr
-  - FIX: Provide non-null gate aliases for tools:
-      - bos_ok (alias of bos_break_ok)
-      - bias_ok (derived when possible; else None)
-  - Keep: Legacy extractor unchanged
+========================================================
+DESIGN PRINCIPLES (Production)
+========================================================
+- Confirm-only: AI must NOT modify plan (entry/sl/tp). It only approves/denies.
+- Fail-closed: Missing critical fields -> SKIP
+- Single execution entry: always call mt5_executor.execute(execution_package)
+- Observability: JSONL logging for every cycle
+- Minimal assumptions: Signal/AI accessed via HTTP endpoints (configurable)
 
-SAFETY
-- Confirm-only: does NOT place orders.
-- Fail-closed: exception -> ok=false JSON with short trace + engine_dbg.
+========================================================
+FILES
+========================================================
+- logs/mentor_executor.jsonl          : orchestrator audit log
+- uses mt5_executor.py (v1.3.1+)      : final gate + order_send + dedup/log
+
+========================================================
+CONFIG (env overrides)
+========================================================
+SIGNAL_URL      default: http://127.0.0.1:5000/api/signal_preview
+AI_CONFIRM_URL  default: http://127.0.0.1:5000/api/ai_confirm
+POLL_INTERVAL   default: 2.0 seconds
+DRY_RUN         default: 0 (0/1)
+SYMBOL          default: GOLD
+
+Notes:
+- You can keep SIGNAL_URL pointing to your engine endpoint.
+- You can keep AI_CONFIRM_URL pointing to your AI confirmation service endpoint.
 """
 
 from __future__ import annotations
 
-import inspect
-import json
 import os
+import sys
 import time
-import traceback
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+import json
+import uuid
+import hashlib
+import datetime as dt
+from typing import Any, Dict, Optional, Tuple
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------
+# VERSION
+# -----------------------------
+VERSION = "v1.0.0"
+
+
+# -----------------------------
+# DEFAULT CONFIG
+# -----------------------------
+DEFAULT_SIGNAL_URL = "http://127.0.0.1:5000/api/signal_preview"
+DEFAULT_AI_CONFIRM_URL = "http://127.0.0.1:5000/api/ai_confirm"
+DEFAULT_POLL_INTERVAL = 2.0
+DEFAULT_DRY_RUN = "0"
+DEFAULT_SYMBOL = "GOLD"
+
+MENTOR_LOG_FILE = os.path.join("logs", "mentor_executor.jsonl")
+
+
+# -----------------------------
 # Utilities
-# -----------------------------------------------------------------------------
-
-def utc_iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def json_dumps_compact(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
+# -----------------------------
+def now_epoch() -> float:
+    return time.time()
 
 
-def safe_float(x: Any, default: Optional[float] = None) -> Optional[float]:
+def now_utc_iso() -> str:
+    return dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc).isoformat()
+
+
+def safe_json(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+def ensure_logs_dir() -> None:
+    os.makedirs(os.path.dirname(MENTOR_LOG_FILE), exist_ok=True)
+
+
+def append_jsonl(path: str, record: Dict[str, Any]) -> None:
+    line = safe_json(record)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+def http_get_json(url: str, timeout_sec: float = 8.0) -> Tuple[bool, Any]:
     try:
-        if x is None:
-            return default
-        return float(x)
+        req = Request(url, method="GET", headers={"Accept": "application/json"})
+        with urlopen(req, timeout=timeout_sec) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        return True, json.loads(body)
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as e:
+        return False, str(e)
+
+
+def http_post_json(url: str, payload: Dict[str, Any], timeout_sec: float = 12.0) -> Tuple[bool, Any]:
+    try:
+        data = safe_json(payload).encode("utf-8")
+        req = Request(
+            url,
+            method="POST",
+            data=data,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        with urlopen(req, timeout=timeout_sec) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        return True, json.loads(body)
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as e:
+        return False, str(e)
+
+
+def normalize_decision(x: Any) -> str:
+    return str(x or "").upper().strip()
+
+
+def is_number(x: Any) -> bool:
+    try:
+        float(x)
+        return True
     except Exception:
-        return default
-
-
-def safe_int(x: Any, default: Optional[int] = None) -> Optional[int]:
-    try:
-        if x is None:
-            return default
-        return int(x)
-    except Exception:
-        return default
-
-
-def load_json(path: str, default: Any) -> Any:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-
-def cfg_get(cfg: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
-    cur: Any = cfg
-    for k in keys:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return cur
-
-
-def normalize_blocked_by(x: Any) -> List[str]:
-    items: List[str] = []
-    if x is None:
-        items = []
-    elif isinstance(x, (list, tuple, set)):
-        for it in x:
-            s = str(it).strip()
-            if s:
-                items.append(s)
-    else:
-        s = str(x).strip()
-        if s:
-            parts = [p.strip() for p in s.split(",")]
-            items = [p for p in parts if p]
-
-    seen = set()
-    out: List[str] = []
-    for it in items:
-        if it not in seen:
-            out.append(it)
-            seen.add(it)
-    return out
-
-
-# -----------------------------------------------------------------------------
-# Engine auto-discovery caller (best-effort, schema-agnostic)
-# -----------------------------------------------------------------------------
-
-def _to_dict_any(out: Any) -> Dict[str, Any]:
-    if isinstance(out, dict):
-        return out
-    if hasattr(out, "to_dict") and callable(getattr(out, "to_dict")):
-        d = out.to_dict()
-        return d if isinstance(d, dict) else {"repr": repr(d)}
-    if hasattr(out, "__dict__"):
-        return dict(out.__dict__)
-    return {"repr": repr(out)}
-
-
-def _call_method_safely(obj: Any, name: str, symbol: str, cfg: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], str]:
-    fn = getattr(obj, name, None)
-    if not callable(fn):
-        return False, None, "not_callable"
-
-    try:
-        try:
-            sig = inspect.signature(fn)
-            params = [p for p in sig.parameters.values()
-                      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
-            argc = len(params)
-        except Exception:
-            argc = -1
-
-        tries: List[Tuple[Tuple[Any, ...], str]] = []
-        if argc == 0:
-            tries = [((), "0args")]
-        elif argc == 1:
-            tries = [((symbol,), "1arg_symbol")]
-        elif argc >= 2:
-            tries = [((symbol, cfg), "2args_symbol_cfg"), ((symbol,), "1arg_symbol"), ((), "0args")]
-        else:
-            tries = [((symbol, cfg), "2args_symbol_cfg"), ((symbol,), "1arg_symbol"), ((), "0args")]
-
-        last_err = ""
-        for args, tag in tries:
-            try:
-                out = fn(*args)
-                d = _to_dict_any(out)
-                return True, d, tag
-            except TypeError as te:
-                last_err = f"TypeError:{te}"
-                continue
-            except Exception as e:
-                return False, None, f"{tag}:{type(e).__name__}:{e}"
-
-        return False, None, last_err or "no_compatible_signature"
-    except Exception as e:
-        return False, None, f"invoke_failed:{type(e).__name__}:{e}"
-
-
-def call_engine_autodiscovery(config_path: str, cfg: Dict[str, Any], symbol: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    dbg: Dict[str, Any] = {
-        "ok": False,
-        "engine_ctor": None,
-        "picked_method": None,
-        "picked_call": None,
-        "candidates": [],
-        "errors": []
-    }
-
-    try:
-        from engine import TradingEngine  # type: ignore
-    except Exception as ex:
-        dbg["errors"].append(f"import_engine_failed:{type(ex).__name__}:{ex}")
-        return None, dbg
-
-    engine_instances: List[Tuple[str, Any]] = []
-    try:
-        engine_instances.append(("TradingEngine(config_path)", TradingEngine(config_path)))
-    except Exception as ex:
-        dbg["errors"].append(f"ctor_path_failed:{type(ex).__name__}:{ex}")
-
-    try:
-        if isinstance(cfg, dict) and cfg:
-            engine_instances.append(("TradingEngine(config_dict)", TradingEngine(cfg)))
-    except Exception as ex:
-        dbg["errors"].append(f"ctor_dict_failed:{type(ex).__name__}:{ex}")
-
-    if not engine_instances:
-        return None, dbg
-
-    preferred = ["generate_signal_package"]
-    patterns = ["signal", "package", "eval", "run", "analy", "build"]
-
-    def score_name(n: str) -> int:
-        nlow = n.lower()
-        score = 0
-        for i, pn in enumerate(preferred):
-            if nlow == pn.lower():
-                score += 200 - i
-        for p in patterns:
-            if p in nlow:
-                score += 10
-        if nlow.startswith("_"):
-            score -= 50
-        return score
-
-    for ctor_name, eng in engine_instances:
-        names = [n for n in dir(eng) if not n.startswith("__")]
-        scored = sorted([(score_name(n), n) for n in names], reverse=True)
-        top = [n for s, n in scored if s > 0][:25]
-
-        dbg["engine_ctor"] = ctor_name
-        dbg["candidates"] = top
-
-        for name in top:
-            ok, d, call_tag = _call_method_safely(eng, name, symbol=symbol, cfg=cfg)
-            if ok and isinstance(d, dict):
-                dbg["ok"] = True
-                dbg["picked_method"] = name
-                dbg["picked_call"] = call_tag
-                return d, dbg
-            else:
-                if call_tag and len(dbg["errors"]) < 12:
-                    dbg["errors"].append(f"{name}:{call_tag}")
-
-    return None, dbg
-
-
-# -----------------------------------------------------------------------------
-# Legacy extractor (unchanged)
-# -----------------------------------------------------------------------------
-
-def extract_from_signal_package(pkg: Dict[str, Any]) -> Dict[str, Any]:
-    ctx = pkg.get("context", {})
-    if not isinstance(ctx, dict):
-        ctx = {}
-
-    blocked_by_list = normalize_blocked_by(ctx.get("blocked_by"))
-
-    direction = pkg.get("direction", None)
-    decision = direction
-
-    entry = pkg.get("entry_candidate", None)
-    sl = pkg.get("stop_candidate", None)
-    tp = pkg.get("tp_candidate", None)
-    rr = safe_float(pkg.get("rr", None), 0.0) or 0.0
-
-    score = safe_float(pkg.get("score", None), 0.0) or 0.0
-    confidence_py = safe_int(pkg.get("confidence_py", None), 0) or 0
-
-    htf_trend = ctx.get("HTF_trend", None)
-    mtf_trend = ctx.get("MTF_trend", None)
-    ltf_trend = ctx.get("LTF_trend", None)
-
-    supertrend_dir = ctx.get("supertrend_dir", None)
-    supertrend_value = safe_float(ctx.get("supertrend_value", None), None)
-    supertrend_ok = pkg.get("supertrend_ok", None)
-
-    atr = safe_float(ctx.get("atr", None), None)
-    atr_period = safe_int(ctx.get("atr_period", None), None)
-    atr_sl_mult = safe_float(ctx.get("atr_sl_mult", None), None)
-    min_rr = safe_float(ctx.get("min_rr", None), None)
-
-    gates = ctx.get("gates", None)
-    if not isinstance(gates, dict):
-        gates = {}
-
-    ctx_metrics = ctx.get("metrics", None)
-    if not isinstance(ctx_metrics, dict):
-        ctx_metrics = {}
-
-    obs = {
-        "engine_version": ctx.get("engine_version", None),
-        "mode": ctx.get("mode", None),
-        "bias_source": ctx.get("bias_source", None),
-        "direction_bias": ctx.get("direction_bias", None),
-        "watch_state": ctx.get("watch_state", None),
-
-        "structure": {
-            "htf_trend": htf_trend,
-            "mtf_trend": mtf_trend,
-            "ltf_trend": ltf_trend,
-        },
-        "metrics": {
-            "atr": atr,
-            "atr_period": atr_period,
-            "supertrend_dir": supertrend_dir,
-            "supertrend_value": supertrend_value,
-
-            "event_timeframe": ctx_metrics.get("event_timeframe", None),
-            "bb_width_points": ctx_metrics.get("bb_width_points", None),
-            "bb_width_atr": ctx_metrics.get("bb_width_atr", None),
-            "bb_width_atr_min": ctx_metrics.get("bb_width_atr_min", None),
-
-            "supertrend_conflict": ctx_metrics.get("supertrend_conflict", None),
-            "supertrend_distance_points": ctx_metrics.get("supertrend_distance_points", None),
-            "supertrend_distance_atr": ctx_metrics.get("supertrend_distance_atr", None),
-
-            "bos_break_up_atr": ctx_metrics.get("bos_break_up_atr", None),
-            "bos_break_dn_atr": ctx_metrics.get("bos_break_dn_atr", None),
-        },
-        "thresholds": {
-            "atr_sl_mult": atr_sl_mult,
-            "min_rr": min_rr,
-        },
-        "gates": {
-            "blocked_by": blocked_by_list,
-            "supertrend_ok": supertrend_ok,
-            "supertrend_conflict": ctx_metrics.get("supertrend_conflict", None),
-            "bias_ok": gates.get("bias_ok", None),
-            "vol_expansion_ok": gates.get("vol_expansion_ok", None),
-            "bos_ok": gates.get("bos_ok", None),
-            "bos_break_ok": gates.get("bos_break_ok", None),
-            "rr_ok": gates.get("rr_ok", None),
-        }
-    }
-
-    return {
-        "decision": decision,
-        "blocked_by": blocked_by_list,
-        "confidence": score,
-        "confidence_py": confidence_py,
-        "plan": {"entry": entry, "sl": sl, "tp": tp, "rr": rr},
-        "obs": obs,
-    }
-
-
-# -----------------------------------------------------------------------------
-# Schema Router for Engine v2.12.x
-# -----------------------------------------------------------------------------
-
-def is_engine_v212_schema(pkg: Dict[str, Any]) -> bool:
-    if not isinstance(pkg, dict):
         return False
-    return ("decision" in pkg) and ("blocked_by" in pkg) and ("gates" in pkg)
 
 
-def extract_from_engine_v212(pkg: Dict[str, Any]) -> Dict[str, Any]:
-    decision = pkg.get("decision", None)
-    blocked_by_list = normalize_blocked_by(pkg.get("blocked_by", []))
-
-    metrics = pkg.get("metrics", {})
-    if not isinstance(metrics, dict):
-        metrics = {}
-
-    gates_src = pkg.get("gates", {})
-    if not isinstance(gates_src, dict):
-        gates_src = {}
-
-    # aliases for tools expecting legacy names
-    bos_break_ok = gates_src.get("bos_break_ok", None)
-    bos_ok_alias = bos_break_ok  # production alias
-    bias_ok_alias = gates_src.get("bias_ok", None)  # engine may not provide; keep as-is
-
-    obs = {
-        "engine_version": pkg.get("engine_version", None),
-        "mode": None,
-        "bias_source": None,
-        "direction_bias": pkg.get("bias", None),
-        "watch_state": None,
-
-        "structure": {"htf_trend": None, "mtf_trend": None, "ltf_trend": None},
-        "metrics": {
-            "atr": safe_float(cfg_get(pkg, ["price", "atr"], None), None),
-            "atr_period": None,
-
-            "supertrend_dir": metrics.get("supertrend_dir_event", None),
-            "supertrend_value": None,
-
-            "event_timeframe": pkg.get("event_timeframe", None),
-            "bb_width_points": None,
-            "bb_width_atr": metrics.get("bb_width_atr", None),
-            "bb_width_atr_min": metrics.get("bb_width_atr_min_used", None),
-
-            "supertrend_conflict": gates_src.get("supertrend_conflict", None),
-            "supertrend_distance_points": None,
-            "supertrend_distance_atr": metrics.get("supertrend_distance_atr", None),
-
-            # FIX v2.13.5: expose BOS metrics to tools
-            "bos_break_up_atr": metrics.get("bos_break_up_atr", None),
-            "bos_break_dn_atr": metrics.get("bos_break_dn_atr", None),
-
-            # Optional RR visibility (not required for BOS analysis, but helpful)
-            "rr": metrics.get("rr", None),
-            "min_rr_used": metrics.get("min_rr_used", None),
-        },
-        "thresholds": {"atr_sl_mult": None, "min_rr": None},
-        "gates": {
-            "blocked_by": blocked_by_list,
-            "supertrend_ok": gates_src.get("supertrend_ok", None),
-            "supertrend_conflict": gates_src.get("supertrend_conflict", None),
-
-            "bias_ok": bias_ok_alias,
-            "vol_expansion_ok": gates_src.get("vol_expansion_ok", None),
-
-            # FIX v2.13.5: provide bos_ok (legacy name) + keep bos_break_ok
-            "bos_ok": bos_ok_alias,
-            "bos_break_ok": bos_break_ok,
-
-            "rr_ok": gates_src.get("rr_ok", None),
-        }
-    }
-
-    rr_val = safe_float(metrics.get("rr", None), None)
-    plan = {"entry": None, "sl": None, "tp": None, "rr": (rr_val if rr_val is not None else 0.0)}
-    confidence = safe_float(metrics.get("score", 0.0), 0.0) or 0.0
-
-    return {
-        "decision": decision,
-        "blocked_by": blocked_by_list,
-        "confidence": confidence,
-        "confidence_py": 0,
-        "plan": plan,
-        "obs": obs,
-    }
+def minimal_plan_ok(plan: Any) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    return all(k in plan for k in ("entry", "sl", "tp"))
 
 
-def extract_router(pkg: Dict[str, Any]) -> Dict[str, Any]:
-    if is_engine_v212_schema(pkg):
-        return extract_from_engine_v212(pkg)
-    return extract_from_signal_package(pkg)
+def make_request_id(symbol: str, decision: str, plan: Dict[str, Any]) -> str:
+    """
+    request_id must be unique and stable enough for dedup.
+    Strategy:
+    - UTC timestamp (to seconds)
+    - short hash of (symbol, decision, sl, tp) to help trace
+    - random suffix to avoid collision in same second
+    """
+    ts = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    key = f"{symbol}|{decision}|{plan.get('sl')}|{plan.get('tp')}"
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    r = uuid.uuid4().hex[:6]
+    return f"{ts}_{symbol}_{decision}_{h}_{r}"
 
 
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
+# -----------------------------
+# Core Orchestrator
+# -----------------------------
+class MentorExecutor:
+    def __init__(self) -> None:
+        ensure_logs_dir()
 
-def main() -> int:
-    t0 = time.time()
+        self.signal_url = os.environ.get("SIGNAL_URL", DEFAULT_SIGNAL_URL).strip()
+        self.ai_confirm_url = os.environ.get("AI_CONFIRM_URL", DEFAULT_AI_CONFIRM_URL).strip()
+        self.poll_interval = float(os.environ.get("POLL_INTERVAL", str(DEFAULT_POLL_INTERVAL)))
+        self.dry_run = os.environ.get("DRY_RUN", DEFAULT_DRY_RUN).strip() in ("1", "true", "TRUE", "yes", "YES")
+        self.symbol = os.environ.get("SYMBOL", DEFAULT_SYMBOL).strip()
 
-    config_path = os.environ.get("HIM_CONFIG", "config.json")
-    cfg = load_json(config_path, {})
-    if not isinstance(cfg, dict):
-        cfg = {}
+        # import mt5_executor lazily to keep mentor stable even if MT5 not ready
+        from mt5_executor import MT5Executor  # type: ignore
 
-    symbol_cfg = str(cfg.get("symbol", "GOLD"))
-    live = bool(cfg_get(cfg, ["execution", "enable_execution"], cfg.get("enable_execution", False)))
-    lot = safe_float(cfg_get(cfg, ["risk", "lot"], cfg.get("lot", None)), None)
+        self.mt5 = MT5Executor(symbol=self.symbol)
 
-    pkg, engine_dbg = call_engine_autodiscovery(config_path, cfg, symbol_cfg)
+    def log(self, record: Dict[str, Any]) -> None:
+        record.setdefault("ts", now_epoch())
+        record.setdefault("utc", now_utc_iso())
+        record.setdefault("mentor_version", VERSION)
+        append_jsonl(MENTOR_LOG_FILE, record)
 
-    if not isinstance(pkg, dict):
+    def fetch_signal(self) -> Tuple[bool, Any]:
+        return http_get_json(self.signal_url)
+
+    def ai_confirm(self, execution_package: Dict[str, Any]) -> Tuple[bool, Any]:
+        """
+        Sends only what AI needs to approve/deny.
+        IMPORTANT: AI must not modify plan; mentor will ignore plan changes if any.
+        """
         payload = {
-            "ts": utc_iso_now(),
-            "type": "MENTOR_EXECUTOR",
-            "version": "v2.13.5",
-            "ok": False,
-            "symbol": symbol_cfg,
-            "live": live,
-            "lot": lot,
-            "elapsed_ms": int((time.time() - t0) * 1000),
-            "error": "ENGINE_CALL_FAILED",
-            "engine_dbg": engine_dbg,
+            "request_id": execution_package.get("request_id"),
+            "symbol": self.symbol,
+            "decision": execution_package.get("decision"),
+            "plan": execution_package.get("plan"),
+            "context": execution_package.get("context", {}),
         }
-        print(json_dumps_compact(payload))
-        return 2
+        return http_post_json(self.ai_confirm_url, payload)
 
-    ex = extract_router(pkg)
+    def build_execution_package(self, raw_signal: Dict[str, Any]) -> Tuple[bool, Dict[str, Any], str]:
+        decision = normalize_decision(raw_signal.get("decision"))
+        plan = raw_signal.get("plan")
 
-    payload = {
-        "ts": utc_iso_now(),
-        "type": "MENTOR_EXECUTOR",
-        "version": "v2.13.5",
-        "ok": True,
-        "symbol": str(pkg.get("symbol", symbol_cfg)),
-        "live": live,
-        "lot": lot,
-        "elapsed_ms": int((time.time() - t0) * 1000),
+        # Fail-closed: if not actionable, still package it (AI can approve/deny), but mt5_executor will SKIP
+        if not minimal_plan_ok(plan):
+            return False, {}, "signal_missing_plan"
 
-        "decision": ex.get("decision", None),
-        "blocked_by": ex.get("blocked_by", []),
-        "confidence": ex.get("confidence", 0.0),
-        "confidence_py": ex.get("confidence_py", 0),
-        "plan": ex.get("plan", {"entry": None, "sl": None, "tp": None, "rr": 0.0}),
-        "obs": ex.get("obs", {}),
+        if not (is_number(plan.get("entry")) and is_number(plan.get("sl")) and is_number(plan.get("tp"))):
+            return False, {}, "signal_plan_invalid_numbers"
 
-        "engine_dbg": engine_dbg,
-    }
+        # request_id unique per cycle
+        req_id = raw_signal.get("request_id")
+        if not isinstance(req_id, str) or not req_id.strip():
+            req_id = make_request_id(self.symbol, decision, plan)
 
-    print(json_dumps_compact(payload))
-    return 0
+        pkg = {
+            "request_id": req_id,
+            "decision": decision,
+            "plan": {
+                "entry": float(plan.get("entry")),
+                "sl": float(plan.get("sl")),
+                "tp": float(plan.get("tp")),
+            },
+            # optional: any engine metadata / indicators snapshot
+            "context": raw_signal.get("context", {}),
+            "source": raw_signal.get("source", {}),
+        }
+        return True, pkg, "ok"
+
+    def enforce_confirm_only(self, pkg: Dict[str, Any], ai_resp: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Merge AI response into pkg, but DO NOT allow AI to overwrite plan.
+        Accept only ai_confirm fields:
+          - approved (bool)
+          - reason (str)
+          - confidence (0..1)
+        """
+        ai_confirm = {}
+        if isinstance(ai_resp, dict):
+            approved = ai_resp.get("approved")
+            reason = ai_resp.get("reason", "")
+            conf = ai_resp.get("confidence", None)
+
+            ai_confirm["approved"] = bool(approved is True)
+            ai_confirm["reason"] = str(reason)[:500]
+
+            if is_number(conf):
+                c = float(conf)
+                if c < 0:
+                    c = 0.0
+                if c > 1:
+                    c = 1.0
+                ai_confirm["confidence"] = c
+            else:
+                ai_confirm["confidence"] = None
+
+        pkg["ai_confirm"] = ai_confirm
+        return pkg
+
+    def run_once(self) -> Dict[str, Any]:
+        # 1) Fetch signal
+        ok, raw = self.fetch_signal()
+        if not ok:
+            out = {"status": "SKIP", "reason": "signal_fetch_failed", "detail": raw}
+            self.log({"event": "signal_fetch_failed", "out": out})
+            return out
+
+        if not isinstance(raw, dict):
+            out = {"status": "SKIP", "reason": "signal_invalid_format"}
+            self.log({"event": "signal_invalid_format", "raw": raw, "out": out})
+            return out
+
+        # 2) Build execution package (pre-AI)
+        ok_pkg, pkg, why = self.build_execution_package(raw)
+        if not ok_pkg:
+            out = {"status": "SKIP", "reason": why}
+            self.log({"event": "build_pkg_failed", "raw": raw, "out": out})
+            return out
+
+        # 3) AI final confirm
+        ok_ai, ai = self.ai_confirm(pkg)
+        if not ok_ai:
+            # Fail-closed: AI unreachable -> deny by default
+            pkg["ai_confirm"] = {"approved": False, "reason": "ai_unreachable", "confidence": None}
+            self.log({"event": "ai_call_failed", "request_id": pkg["request_id"], "detail": ai})
+
+            if self.dry_run:
+                out = {"status": "DRY_RUN", "request_id": pkg["request_id"], "reason": "ai_unreachable"}
+                self.log({"event": "dry_run_end", "pkg": pkg, "out": out})
+                return out
+
+            # pass to mt5_executor (it will SKIP ai_denied)
+            mt5_out = self.mt5.execute(pkg)
+            self.log({"event": "mt5_execute", "request_id": pkg["request_id"], "pkg": pkg, "mt5_out": mt5_out})
+            return mt5_out
+
+        if not isinstance(ai, dict):
+            ai = {"approved": False, "reason": "ai_invalid_response", "confidence": None}
+
+        pkg = self.enforce_confirm_only(pkg, ai)
+
+        # 4) Dry-run option
+        if self.dry_run:
+            out = {"status": "DRY_RUN", "request_id": pkg["request_id"], "ai_confirm": pkg.get("ai_confirm")}
+            self.log({"event": "dry_run_end", "pkg": pkg, "out": out})
+            return out
+
+        # 5) Execute via mt5_executor (final authority)
+        mt5_out = self.mt5.execute(pkg)
+        self.log({"event": "mt5_execute", "request_id": pkg["request_id"], "pkg": pkg, "mt5_out": mt5_out})
+        return mt5_out
+
+    def loop(self) -> None:
+        self.log(
+            {
+                "event": "mentor_start",
+                "signal_url": self.signal_url,
+                "ai_confirm_url": self.ai_confirm_url,
+                "poll_interval": self.poll_interval,
+                "dry_run": self.dry_run,
+                "symbol": self.symbol,
+            }
+        )
+
+        while True:
+            out = self.run_once()
+            print(safe_json(out))
+            time.sleep(self.poll_interval)
 
 
+# -----------------------------
+# Entry
+# -----------------------------
 if __name__ == "__main__":
+    print(f"[MentorExecutor] file={os.path.abspath(__file__)} version={VERSION}")
     try:
-        raise SystemExit(main())
-    except SystemExit:
-        raise
+        m = MentorExecutor()
     except Exception as e:
-        payload = {
-            "ts": utc_iso_now(),
-            "type": "MENTOR_EXECUTOR",
-            "version": "v2.13.5",
-            "ok": False,
-            "error": f"UNCAUGHT:{type(e).__name__}:{e}",
-            "trace": traceback.format_exc(limit=3),
-        }
-        print(json_dumps_compact(payload))
-        raise SystemExit(2)
+        print(safe_json({"status": "FATAL", "reason": "init_failed", "detail": str(e)}))
+        sys.exit(1)
+
+    # default: loop forever
+    m.loop()

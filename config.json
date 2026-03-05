@@ -1,40 +1,61 @@
 {
   "_meta": {
-    "config_version": "2.10.1",
-    "last_updated": "2026-02-27",
+    "config_version": "2.11.0",
+    "last_updated": "2026-03-05",
     "changelog": [
-      "SIDEWAY_SCALP: add touch_buffer_atr=0.10 for early entry near BB outer band.",
+      "Fix JSON validity (commissioning block + trailing commas).",
+      "Add runtime services: api/dashboard/ai_confirm/risk_guard/analytics for production sidecars.",
+      "SIDEWAY_SCALP: set touch_buffer_atr=0.10 (per prior changelog intent).",
       "Keep risk.atr_sl_mult=1.6 as source-of-truth."
     ]
   },
+
+  "api": {
+    "host": "127.0.0.1",
+    "port": 5000
+  },
+
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 8502,
+    "external_url": ""
+  },
+
   "symbol": "GOLD",
   "mode": "breakout",
+
   "timeframes": {
     "htf": "H1",
     "mtf": "M15",
     "ltf": "M5"
   },
+
   "structure_sensitivity": {
     "htf": 5,
     "mtf": 4,
     "ltf": 3
   },
+
   "atr": {
     "period": 14,
     "sl_mult": 1.6
   },
+
   "risk": {
     "atr_period": 14,
     "atr_sl_mult": 1.6
   },
+
   "min_rr": 1.6,
   "bos_break_atr_min": 0.05,
   "bos_lookback": 12,
   "st_relax_dist_atr_m1": 0.55,
+
   "supertrend": {
     "period": 10,
     "mult": 3.0
   },
+
   "breakout": {
     "confirm_buffer_atr": 0.05,
     "proximity_threshold_atr": 2.5,
@@ -44,13 +65,17 @@
     "adx_proximity_override": 30.0,
     "dynamic_retest_bypass_adx": 35.0
   },
+
   "commissioning": {
     "enabled": true,
-  "poll_sec": 1.0,
-  "event_timeframes": ["M1"],
-  "events_log_path": "logs/commissioning_events.jsonl",
-  "state_path": ".commission_event_state.json"
+    "poll_sec": 1.0,
+    "event_timeframes": [
+      "M1"
+    ],
+    "events_log_path": "logs/commissioning_events.jsonl",
+    "state_path": ".commission_event_state.json"
   },
+
   "continuation": {
     "enabled": false,
     "require_mtf_ltf_align": true,
@@ -58,24 +83,26 @@
     "proximity_threshold_atr": 1.8,
     "proximity_min_score": 20.0
   },
+
   "sideway_scalp": {
     "enabled": true,
     "adx_period": 14,
-    "adx_max": 35,
+    "adx_max": 35.0,
     "bb_period": 20,
     "bb_std": 2.0,
     "bb_width_atr_max": 6.0,
     "rsi_period": 14,
-    "rsi_overbought": 70,
-    "rsi_oversold": 30,
-    "touch_buffer_atr": 0.2,
+    "rsi_overbought": 70.0,
+    "rsi_oversold": 30.0,
+    "touch_buffer_atr": 0.1,
     "near_trigger_atr": 0.9,
     "proximity_window_atr": 2.5,
-    "rsi_soft_band": 25,
+    "rsi_soft_band": 25.0,
     "allow_soft_trigger": true,
     "require_confirmation": false,
     "proximity_score_min": 0.4
   },
+
   "profiles": {
     "sideway_scalp": {
       "mode": "sideway_scalp",
@@ -114,9 +141,11 @@
       }
     }
   },
+
   "telegram": {
     "enabled": true
   },
+
   "ai": {
     "api_url": "http://127.0.0.1:5000/api/ai_confirm",
     "timeout_sec": 15,
@@ -125,9 +154,31 @@
     "entry_shift_max_pct": 0.0,
     "enforce_mode_lock": false
   },
+
+  "ai_confirm": {
+    "external_url": "",
+    "timeout_sec": 8.0,
+    "min_confidence": null,
+    "min_rr": 1.5
+  },
+
+  "risk_guard": {
+    "initial_equity": 10000.0,
+    "max_daily_dd_pct": 2.0,
+    "max_total_dd_pct": 8.0,
+    "poll_interval_sec": 5
+  },
+
+  "analytics": {
+    "enabled": true,
+    "interval_sec": 10,
+    "output_path": "logs/performance_summary_live.json"
+  },
+
   "proximity_score_min": 0.65,
   "confidence_threshold": 55,
   "min_score": 5,
+
   "lot": 0.01,
   "enable_execution": true
 }
